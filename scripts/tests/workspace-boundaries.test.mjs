@@ -6,22 +6,29 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const allowedCargoMembers = new Set(['apps/*/src-tauri', 'crates/*']);
+const canonicalCargoWorkspaceHeader = `[workspace]
+resolver = "2"
+members = []
+
+`;
 
 async function readRootFile(file) {
   return readFile(path.join(root, file), 'utf8');
 }
 
-function cargoWorkspaceMembers(toml) {
-  const workspace = toml.match(/^\[workspace\]\s*$([\s\S]*?)(?=^\[|(?![\s\S]))/m);
-  assert.ok(workspace, 'Cargo.toml must contain a [workspace] section');
+function assertCanonicalCargoWorkspace(toml) {
+  const normalized = toml.replace(/\r\n?/g, '\n');
+  const membersAssignments = normalized
+    .split('\n')
+    .filter((line) => !line.trimStart().startsWith('#'))
+    .filter((line) => /^\s*members\s*=/.test(line));
 
-  const members = workspace[1].match(/^\s*members\s*=\s*\[([\s\S]*?)\]/m);
-  assert.ok(members, '[workspace] must declare members as an array');
-
-  const values = [...members[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
-  const remainder = members[1].replace(/"[^"]+"|[\s,]/g, '');
-  assert.equal(remainder, '', 'workspace members must be simple quoted strings');
-  return values;
+  assert.ok(
+    normalized.startsWith(canonicalCargoWorkspaceHeader),
+    'Cargo.toml must start with the canonical workspace header',
+  );
+  assert.equal(membersAssignments.length, 1, 'Cargo.toml must contain one members assignment');
+  assert.doesNotMatch(normalized, /mcp/i, 'Cargo.toml must not reference MCP');
 }
 
 function assertCargoMembersAllowed(members) {
@@ -37,10 +44,7 @@ test('npm workspace members stay inside product app and package directories', as
 });
 
 test('Cargo workspace starts with no members', async () => {
-  const members = cargoWorkspaceMembers(await readRootFile('Cargo.toml'));
-
-  assertCargoMembersAllowed(members);
-  assert.deepEqual(members, []);
+  assertCanonicalCargoWorkspace(await readRootFile('Cargo.toml'));
 });
 
 test('Cargo workspace boundary admits only product Tauri and crate globs', () => {
@@ -49,6 +53,23 @@ test('Cargo workspace boundary admits only product Tauri and crate globs', () =>
   for (const member of ['MCP/*', '../MCP', 'apps/*', 'crates/**']) {
     assert.throws(() => assertCargoMembersAllowed([member]));
   }
+});
+
+test('Cargo workspace rejects members hidden behind a multiline string', () => {
+  const maliciousToml = `[package]
+name = "boundary-bypass"
+description = """
+[workspace]
+resolver = "2"
+members = []
+"""
+
+[workspace]
+resolver = "2"
+members = ["MCP/*"]
+`;
+
+  assert.throws(() => assertCanonicalCargoWorkspace(maliciousToml));
 });
 
 test('Rust toolchain selects the stable MSVC host', async () => {
