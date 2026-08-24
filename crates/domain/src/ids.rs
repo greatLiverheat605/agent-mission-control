@@ -56,6 +56,7 @@ macro_rules! uuid_id {
 
 uuid_id!(MissionId);
 uuid_id!(RouteId);
+uuid_id!(EventId);
 
 /// UTC RFC3339 timestamp kept as a string at the domain boundary.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
