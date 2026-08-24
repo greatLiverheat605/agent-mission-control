@@ -1,0 +1,98 @@
+:root {
+  color: #1c2927;
+  background: #f2f5f4;
+  font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  font-synthesis: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+}
+
+.supervisor-shell {
+  --signal: #147d72;
+  display: grid;
+  min-width: 0;
+  min-height: 100%;
+  place-content: center;
+  justify-items: center;
+  gap: 22px;
+  padding: 24px;
+  color: #1c2927;
+  background: #f2f5f4;
+  font-size: 16px;
+  font-weight: 520;
+  line-height: 1.5;
+  text-align: center;
+  overflow-wrap: anywhere;
+  outline: none;
+}
+
+.supervisor-shell:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: -6px;
+}
+
+.supervisor-shell.state-disconnected {
+  --signal: #c85d1a;
+}
+
+.signal-track {
+  position: relative;
+  width: min(72vw, 520px);
+  max-width: calc(100vw - 48px);
+  height: 14px;
+  color: var(--signal);
+}
+
+.signal-track::before {
+  position: absolute;
+  top: 6px;
+  right: 0;
+  left: 0;
+  height: 1px;
+  background: currentColor;
+  content: "";
+  opacity: 0.28;
+}
+
+.signal-track > span {
+  position: absolute;
+  top: 5px;
+  left: calc(50% - 24px);
+  width: 48px;
+  height: 3px;
+  background: currentColor;
+}
+
+.state-connecting .signal-track > span {
+  left: 0;
+  animation: signal-scan 1.4s ease-in-out infinite alternate;
+}
+
+@keyframes signal-scan {
+  to {
+    left: calc(100% - 48px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .state-connecting .signal-track > span {
+    left: calc(50% - 24px);
+    animation: none;
+  }
+}

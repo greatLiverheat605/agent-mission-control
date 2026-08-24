@@ -8,7 +8,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const allowedCargoMembers = new Set(['apps/*/src-tauri', 'crates/*']);
 const canonicalCargoWorkspaceHeader = `[workspace]
 resolver = "2"
-members = ["crates/*"]
+members = ["crates/*", "apps/*/src-tauri"]
 
 `;
 

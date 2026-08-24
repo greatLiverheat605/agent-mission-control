@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
 pub const PROTOCOL_VERSION: u32 = 1;
+pub const PRODUCT_INSTALL_ID: &str = "mission-control-desktop-v1";
 pub const NONCE_BYTES: usize = 32;
 pub const NONCE_TTL: Duration = Duration::from_secs(10 * 60);
 pub const MAX_CACHED_NONCES: usize = 4096;

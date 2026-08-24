@@ -11,8 +11,16 @@ use std::thread;
 use std::time::Duration;
 
 use serde_json::json;
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT};
 use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler};
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+};
 
+use mission_protocol::credential::WindowsCredentialInstallSecret;
+use mission_protocol::handshake::PRODUCT_INSTALL_ID;
+
+use ipc::IpcServer;
 use single_instance::{AcquireResult, SingleInstance, current_user_sid, production_pipe_name};
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
@@ -52,12 +60,18 @@ impl From<std::io::Error> for RunError {
 struct Config {
     pipe_name: Option<String>,
     data_dir: PathBuf,
+    parent_pid: Option<u32>,
+    #[cfg(debug_assertions)]
+    credential_target: Option<String>,
 }
 
 fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Config, RunError> {
     let mut args = args.into_iter();
     let mut pipe_name = None;
     let mut data_dir = None;
+    let mut parent_pid = None;
+    #[cfg(debug_assertions)]
+    let mut credential_target = None;
 
     while let Some(argument) = args.next() {
         match argument.to_str() {
@@ -73,12 +87,12 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Config, RunErr
                 data_dir = Some(PathBuf::from(args.next().ok_or_else(invalid)?));
             }
             Some("--parent-pid") => {
-                let value = args
+                parent_pid = args
                     .next()
                     .and_then(|value| value.into_string().ok())
                     .and_then(|value| value.parse::<u32>().ok())
                     .filter(|value| *value != 0);
-                if value.is_none() {
+                if parent_pid.is_none() {
                     return Err(invalid());
                 }
             }
@@ -92,6 +106,15 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Config, RunErr
                     return Err(invalid());
                 }
             }
+            #[cfg(debug_assertions)]
+            Some("--credential-target") => {
+                credential_target = Some(
+                    args.next()
+                        .and_then(|value| value.into_string().ok())
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(invalid)?,
+                );
+            }
             Some(_) | None => return Err(invalid()),
         }
     }
@@ -99,6 +122,9 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Config, RunErr
     Ok(Config {
         pipe_name,
         data_dir: data_dir.ok_or_else(invalid)?,
+        parent_pid,
+        #[cfg(debug_assertions)]
+        credential_target,
     })
 }
 
@@ -132,6 +158,28 @@ impl Drop for ConsoleHandler {
         unsafe {
             SetConsoleCtrlHandler(Some(console_handler), 0);
         }
+    }
+}
+
+struct ParentProcess(HANDLE);
+
+impl ParentProcess {
+    fn open(pid: u32) -> io::Result<Self> {
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+        if handle.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self(handle))
+    }
+
+    fn is_running(&self) -> bool {
+        (unsafe { WaitForSingleObject(self.0, 0) }) == WAIT_TIMEOUT
+    }
+}
+
+impl Drop for ParentProcess {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
     }
 }
 
@@ -231,9 +279,19 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), RunError> {
         AcquireResult::AlreadyRunning => return Err(RunError::AlreadyRunning),
     };
     let _console_handler = ConsoleHandler::install()?;
+    let parent = config.parent_pid.map(ParentProcess::open).transpose()?;
 
     fs::create_dir_all(&config.data_dir)?;
     let pid = std::process::id();
+    #[cfg(debug_assertions)]
+    let secret_provider = config
+        .credential_target
+        .map(WindowsCredentialInstallSecret::for_test_target)
+        .transpose()?
+        .unwrap_or_default();
+    #[cfg(not(debug_assertions))]
+    let secret_provider = WindowsCredentialInstallSecret::default();
+    let ipc_server = IpcServer::spawn(&pipe_name, PRODUCT_INSTALL_ID, secret_provider)?;
     let ready_file = ReadyFile::publish(&config.data_dir, pid, &pipe_name)?;
     let mut stdout = io::stdout().lock();
     serde_json::to_writer(
@@ -243,12 +301,19 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), RunError> {
     .map_err(io::Error::other)?;
     writeln!(stdout)?;
 
-    while RUNNING.load(Ordering::SeqCst) {
+    while RUNNING.load(Ordering::SeqCst)
+        && ipc_server.is_running()
+        && parent.as_ref().is_none_or(ParentProcess::is_running)
+    {
         thread::sleep(Duration::from_millis(50));
     }
 
-    write_stopped_log(&mut stdout, pid, &pipe_name)?;
-    ready_file.cleanup()?;
+    let shutdown = ipc_server.shutdown();
+    let stopped = write_stopped_log(&mut stdout, pid, &pipe_name);
+    let cleanup = ready_file.cleanup();
+    shutdown?;
+    stopped?;
+    cleanup?;
     Ok(())
 }
 

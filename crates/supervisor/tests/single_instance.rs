@@ -6,15 +6,30 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::ptr;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use windows_sys::Win32::Foundation::ERROR_NOT_FOUND;
+use windows_sys::Win32::Security::Credentials::{
+    CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW,
+};
 use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
 use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
 
-struct TestProcess(Child);
+use mission_protocol::credential::WindowsCredentialInstallSecret;
+use mission_protocol::frame::{read_frame, write_frame};
+use mission_protocol::handshake::{
+    ClientMessage, Handshake, InstallSecretProvider, NONCE_BYTES, PRODUCT_INSTALL_ID,
+    PROTOCOL_VERSION, ServerMessage, handshake_proof,
+};
+
+struct TestProcess {
+    child: Child,
+    credential_target: Option<String>,
+}
 
 static TEST_NONCE: AtomicU64 = AtomicU64::new(0);
 static PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -29,6 +44,7 @@ impl TestProcess {
     }
 
     fn spawn_with_flags(pipe_name: &str, data_dir: &Path, creation_flags: u32) -> Self {
+        let credential_target = test_credential_target(pipe_name);
         Self::spawn_args_with_flags(
             [
                 "--pipe-name",
@@ -39,33 +55,60 @@ impl TestProcess {
                 &std::process::id().to_string(),
                 "--log-level",
                 "debug",
+                "--credential-target",
+                &credential_target,
             ],
             creation_flags,
             Stdio::piped(),
+            Some(credential_target.clone()),
         )
     }
 
     fn spawn_with_stdout(pipe_name: &str, data_dir: &Path, stdout: Stdio) -> Self {
+        let credential_target = test_credential_target(pipe_name);
         Self::spawn_args_with_flags(
             [
                 "--pipe-name",
                 pipe_name,
                 "--data-dir",
                 data_dir.to_str().expect("test data dir is valid Unicode"),
+                "--credential-target",
+                &credential_target,
             ],
             0,
             stdout,
+            Some(credential_target.clone()),
+        )
+    }
+
+    fn spawn_with_parent(pipe_name: &str, data_dir: &Path, parent_pid: u32) -> Self {
+        let credential_target = test_credential_target(pipe_name);
+        Self::spawn_args_with_flags(
+            [
+                "--pipe-name",
+                pipe_name,
+                "--data-dir",
+                data_dir.to_str().expect("test data dir is valid Unicode"),
+                "--parent-pid",
+                &parent_pid.to_string(),
+                "--credential-target",
+                &credential_target,
+            ],
+            0,
+            Stdio::piped(),
+            Some(credential_target.clone()),
         )
     }
 
     fn spawn_args(args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>) -> Self {
-        Self::spawn_args_with_flags(args, 0, Stdio::piped())
+        Self::spawn_args_with_flags(args, 0, Stdio::piped(), None)
     }
 
     fn spawn_args_with_flags(
         args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
         creation_flags: u32,
         stdout: Stdio,
+        credential_target: Option<String>,
     ) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_mission-control-supervisor"));
         command
@@ -76,17 +119,20 @@ impl TestProcess {
             .creation_flags(creation_flags);
         let child = command.spawn().expect("supervisor starts");
 
-        Self(child)
+        Self {
+            child,
+            credential_target,
+        }
     }
 
     fn id(&self) -> u32 {
-        self.0.id()
+        self.child.id()
     }
 
     fn wait_for_exit(&mut self, timeout: Duration) -> Option<std::process::ExitStatus> {
         let deadline = Instant::now() + timeout;
         loop {
-            if let Some(status) = self.0.try_wait().expect("query child status") {
+            if let Some(status) = self.child.try_wait().expect("query child status") {
                 return Some(status);
             }
             if Instant::now() >= deadline {
@@ -97,15 +143,15 @@ impl TestProcess {
     }
 
     fn terminate(&mut self) {
-        if self.0.try_wait().expect("query child status").is_none() {
-            self.0.kill().expect("terminate exact child process");
+        if self.child.try_wait().expect("query child status").is_none() {
+            self.child.kill().expect("terminate exact child process");
         }
-        self.0.wait().expect("reap child process");
+        self.child.wait().expect("reap child process");
     }
 
     fn read_stderr(&mut self) -> String {
         let mut stderr = String::new();
-        self.0
+        self.child
             .stderr
             .take()
             .expect("child stderr is captured")
@@ -116,7 +162,7 @@ impl TestProcess {
 
     fn read_stdout(&mut self) -> String {
         let mut stdout = String::new();
-        self.0
+        self.child
             .stdout
             .take()
             .expect("child stdout is captured")
@@ -138,10 +184,43 @@ impl TestProcess {
 
 impl Drop for TestProcess {
     fn drop(&mut self) {
-        if self.0.try_wait().is_ok_and(|status| status.is_none()) {
-            let _ = self.0.kill();
+        if self.child.try_wait().is_ok_and(|status| status.is_none()) {
+            let _ = self.child.kill();
         }
-        let _ = self.0.wait();
+        let _ = self.child.wait();
+        if let Some(target) = &self.credential_target {
+            delete_test_credential(target);
+        }
+    }
+}
+
+fn test_credential_target(pipe_name: &str) -> String {
+    format!(
+        "Agent Mission Control/Test/Supervisor/{}/{}",
+        std::process::id(),
+        pipe_name
+    )
+}
+
+fn delete_test_credential(target: &str) {
+    let target: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
+    unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) };
+}
+
+fn assert_test_credential_missing(target: &str) {
+    let target: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
+    let mut credential: *mut CREDENTIALW = ptr::null_mut();
+    assert_eq!(
+        unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) },
+        0
+    );
+    assert!(credential.is_null());
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(ERROR_NOT_FOUND as i32)
+    );
+    if !credential.is_null() {
+        unsafe { CredFree(credential.cast()) };
     }
 }
 
@@ -175,6 +254,51 @@ fn wait_for_ready(path: &Path, expected_pid: u32, expected_pipe: &str) {
     }
 }
 
+fn assert_authenticated_ping(pipe_name: &str) {
+    let pipe_path = format!(r"\\.\pipe\{pipe_name}");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut pipe = loop {
+        match fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&pipe_path)
+        {
+            Ok(pipe) => break pipe,
+            Err(error) => {
+                assert!(Instant::now() < deadline, "connect to ready pipe: {error}");
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+    };
+    let secret = WindowsCredentialInstallSecret::for_test_target(test_credential_target(pipe_name))
+        .expect("accept unique non-secret process test target")
+        .install_secret()
+        .expect("desktop and supervisor share the install secret");
+    let nonce = vec![7; NONCE_BYTES];
+    let versions = vec![PROTOCOL_VERSION];
+    let proof = handshake_proof(&secret, PRODUCT_INSTALL_ID, &nonce, &versions)
+        .expect("sign production handshake");
+    write_frame(
+        &mut pipe,
+        &ClientMessage::Handshake(Handshake {
+            install_id: PRODUCT_INSTALL_ID.to_owned(),
+            protocol_versions: versions,
+            nonce,
+            proof,
+        }),
+    )
+    .expect("write production handshake");
+    assert!(matches!(
+        read_frame(&mut pipe).expect("read handshake acceptance"),
+        ServerMessage::HandshakeAccepted(_)
+    ));
+    write_frame(&mut pipe, &ClientMessage::Ping).expect("write ping");
+    assert!(matches!(
+        read_frame(&mut pipe).expect("read pong"),
+        ServerMessage::Pong(_)
+    ));
+}
+
 #[test]
 fn a_named_instance_excludes_competitors_and_releases_after_exit() {
     let _serial = PROCESS_TEST_LOCK.lock().expect("lock process tests");
@@ -192,6 +316,7 @@ fn a_named_instance_excludes_competitors_and_releases_after_exit() {
 
     let mut first = TestProcess::spawn(&pipe_name, &data_dir);
     wait_for_ready(&ready_path, first.id(), &pipe_name);
+    assert_authenticated_ping(&pipe_name);
 
     let competing_pipe_name = format!("{pipe_name}-competitor");
     let mut second = TestProcess::spawn(&competing_pipe_name, &data_dir);
@@ -229,7 +354,20 @@ fn a_named_instance_excludes_competitors_and_releases_after_exit() {
     assert_eq!(events[0]["event"], "supervisor.ready");
     assert_eq!(events[1]["event"], "supervisor.stopped");
     assert!(!ready_path.exists(), "graceful shutdown removes ready file");
+    assert!(
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(format!(r"\\.\pipe\{pipe_name}"))
+            .is_err(),
+        "graceful shutdown releases the pipe"
+    );
 
+    let credential_target = test_credential_target(&pipe_name);
+    drop(third);
+    drop(second);
+    drop(first);
+    assert_test_credential_missing(&credential_target);
     fs::remove_dir_all(&data_dir).expect("remove isolated test data dir");
 }
 
@@ -328,4 +466,47 @@ fn invalid_arguments_emit_one_safe_structured_error() {
         );
         assert!(!stderr.contains("sensitive"));
     }
+}
+
+#[test]
+fn supervisor_exits_when_its_parent_process_is_gone() {
+    let _serial = PROCESS_TEST_LOCK.lock().expect("lock process tests");
+    let data_dir = unique_test_dir();
+    fs::create_dir_all(&data_dir).expect("create isolated test data dir");
+    let pipe_name = "mission-control-departed-parent-test";
+    let mut departed_parent = Command::new("cmd.exe")
+        .args(["/d", "/c", "exit", "0"])
+        .spawn()
+        .expect("start short-lived parent fixture");
+    let departed_pid = departed_parent.id();
+    departed_parent.wait().expect("fixture parent exits");
+    let mut supervisor = TestProcess::spawn_with_parent(pipe_name, &data_dir, departed_pid);
+
+    let status = supervisor
+        .wait_for_exit(Duration::from_secs(2))
+        .expect("supervisor cannot outlive a departed parent");
+    let events: Vec<serde_json::Value> = supervisor
+        .read_stdout()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("stdout line is valid JSON"))
+        .collect();
+
+    assert_eq!(status.code(), Some(0));
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["event"], "supervisor.ready");
+    assert_eq!(events[1]["event"], "supervisor.stopped");
+    assert!(!data_dir.join("supervisor.ready").exists());
+    assert!(
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(format!(r"\\.\pipe\{pipe_name}"))
+            .is_err(),
+        "parent shutdown releases the pipe"
+    );
+
+    let credential_target = test_credential_target(pipe_name);
+    drop(supervisor);
+    assert_test_credential_missing(&credential_target);
+    fs::remove_dir_all(&data_dir).expect("remove isolated test data dir");
 }
