@@ -1,10 +1,15 @@
 #![cfg(windows)]
 
-use std::fs::{self, File};
+use std::fs;
+#[cfg(any(debug_assertions, feature = "test-credential-target"))]
+use std::fs::File;
 use std::io::Read;
+#[cfg(any(debug_assertions, feature = "test-credential-target"))]
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::process::CommandExt;
-use std::path::{Path, PathBuf};
+#[cfg(any(debug_assertions, feature = "test-credential-target"))]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::ptr;
 use std::sync::Mutex;
@@ -16,11 +21,16 @@ use windows_sys::Win32::Foundation::ERROR_NOT_FOUND;
 use windows_sys::Win32::Security::Credentials::{
     CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW,
 };
+#[cfg(any(debug_assertions, feature = "test-credential-target"))]
 use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+#[cfg(any(debug_assertions, feature = "test-credential-target"))]
 use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
 
+#[cfg(any(debug_assertions, feature = "test-credential-target"))]
 use mission_protocol::credential::WindowsCredentialInstallSecret;
+#[cfg(any(debug_assertions, feature = "test-credential-target"))]
 use mission_protocol::frame::{read_frame, write_frame};
+#[cfg(any(debug_assertions, feature = "test-credential-target"))]
 use mission_protocol::handshake::{
     ClientMessage, Handshake, InstallSecretProvider, NONCE_BYTES, PRODUCT_INSTALL_ID,
     PROTOCOL_VERSION, ServerMessage, handshake_proof,
@@ -35,14 +45,17 @@ static TEST_NONCE: AtomicU64 = AtomicU64::new(0);
 static PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 impl TestProcess {
+    #[cfg(any(debug_assertions, feature = "test-credential-target"))]
     fn spawn(pipe_name: &str, data_dir: &Path) -> Self {
         Self::spawn_with_flags(pipe_name, data_dir, 0)
     }
 
+    #[cfg(any(debug_assertions, feature = "test-credential-target"))]
     fn spawn_process_group(pipe_name: &str, data_dir: &Path) -> Self {
         Self::spawn_with_flags(pipe_name, data_dir, CREATE_NEW_PROCESS_GROUP)
     }
 
+    #[cfg(any(debug_assertions, feature = "test-credential-target"))]
     fn spawn_with_flags(pipe_name: &str, data_dir: &Path, creation_flags: u32) -> Self {
         let credential_target = test_credential_target(pipe_name);
         Self::spawn_args_with_flags(
@@ -64,6 +77,7 @@ impl TestProcess {
         )
     }
 
+    #[cfg(any(debug_assertions, feature = "test-credential-target"))]
     fn spawn_with_stdout(pipe_name: &str, data_dir: &Path, stdout: Stdio) -> Self {
         let credential_target = test_credential_target(pipe_name);
         Self::spawn_args_with_flags(
@@ -81,6 +95,7 @@ impl TestProcess {
         )
     }
 
+    #[cfg(any(debug_assertions, feature = "test-credential-target"))]
     fn spawn_with_parent(pipe_name: &str, data_dir: &Path, parent_pid: u32) -> Self {
         let credential_target = test_credential_target(pipe_name);
         Self::spawn_args_with_flags(
@@ -125,6 +140,7 @@ impl TestProcess {
         }
     }
 
+    #[cfg(any(debug_assertions, feature = "test-credential-target"))]
     fn id(&self) -> u32 {
         self.child.id()
     }
@@ -160,6 +176,7 @@ impl TestProcess {
         stderr
     }
 
+    #[cfg(any(debug_assertions, feature = "test-credential-target"))]
     fn read_stdout(&mut self) -> String {
         let mut stdout = String::new();
         self.child
@@ -171,6 +188,7 @@ impl TestProcess {
         stdout
     }
 
+    #[cfg(any(debug_assertions, feature = "test-credential-target"))]
     fn send_ctrl_break(&self) {
         if unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, self.id()) } == 0 {
             panic!(
@@ -236,6 +254,7 @@ fn unique_test_dir() -> PathBuf {
     ))
 }
 
+#[cfg(any(debug_assertions, feature = "test-credential-target"))]
 fn wait_for_ready(path: &Path, expected_pid: u32, expected_pipe: &str) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -254,6 +273,7 @@ fn wait_for_ready(path: &Path, expected_pid: u32, expected_pipe: &str) {
     }
 }
 
+#[cfg(any(debug_assertions, feature = "test-credential-target"))]
 fn assert_authenticated_ping(pipe_name: &str) {
     let pipe_path = format!(r"\\.\pipe\{pipe_name}");
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -299,6 +319,7 @@ fn assert_authenticated_ping(pipe_name: &str) {
     ));
 }
 
+#[cfg(any(debug_assertions, feature = "test-credential-target"))]
 #[test]
 fn a_named_instance_excludes_competitors_and_releases_after_exit() {
     let _serial = PROCESS_TEST_LOCK.lock().expect("lock process tests");
@@ -371,6 +392,7 @@ fn a_named_instance_excludes_competitors_and_releases_after_exit() {
     fs::remove_dir_all(&data_dir).expect("remove isolated test data dir");
 }
 
+#[cfg(any(debug_assertions, feature = "test-credential-target"))]
 #[test]
 fn output_error_after_ready_publish_removes_the_ready_file() {
     let _serial = PROCESS_TEST_LOCK.lock().expect("lock process tests");
@@ -398,6 +420,7 @@ fn output_error_after_ready_publish_removes_the_ready_file() {
     fs::remove_dir_all(&data_dir).expect("remove isolated test data dir");
 }
 
+#[cfg(any(debug_assertions, feature = "test-credential-target"))]
 #[test]
 fn graceful_shutdown_propagates_ready_cleanup_failure() {
     let _serial = PROCESS_TEST_LOCK.lock().expect("lock process tests");
@@ -468,6 +491,47 @@ fn invalid_arguments_emit_one_safe_structured_error() {
     }
 }
 
+#[cfg(all(not(debug_assertions), not(feature = "test-credential-target")))]
+#[test]
+fn release_binary_rejects_test_credential_target() {
+    let _serial = PROCESS_TEST_LOCK.lock().expect("lock process tests");
+    let data_dir = unique_test_dir();
+    fs::create_dir_all(&data_dir).expect("create isolated test data dir");
+    let target = test_credential_target("release-rejection-test");
+    delete_test_credential(&target);
+    let mut process = TestProcess::spawn_args_with_flags(
+        [
+            "--data-dir",
+            data_dir.to_str().expect("test data dir is valid Unicode"),
+            "--credential-target",
+            &target,
+        ],
+        0,
+        Stdio::piped(),
+        Some(target.clone()),
+    );
+
+    let status = process.wait_for_exit(Duration::from_secs(2));
+    if status.is_none() {
+        process.terminate();
+    }
+    let stderr = process.read_stderr();
+    drop(process);
+    assert_test_credential_missing(&target);
+    fs::remove_dir_all(&data_dir).expect("remove isolated test data dir");
+
+    assert_eq!(status.and_then(|status| status.code()), Some(2));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(stderr.trim())
+            .expect("stderr is structured JSON"),
+        serde_json::json!({
+            "event": "supervisor.error",
+            "errorCode": "invalid_arguments"
+        })
+    );
+}
+
+#[cfg(any(debug_assertions, feature = "test-credential-target"))]
 #[test]
 fn supervisor_exits_when_its_parent_process_is_gone() {
     let _serial = PROCESS_TEST_LOCK.lock().expect("lock process tests");

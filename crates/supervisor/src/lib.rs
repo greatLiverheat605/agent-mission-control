@@ -61,7 +61,7 @@ struct Config {
     pipe_name: Option<String>,
     data_dir: PathBuf,
     parent_pid: Option<u32>,
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "test-credential-target"))]
     credential_target: Option<String>,
 }
 
@@ -70,7 +70,7 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Config, RunErr
     let mut pipe_name = None;
     let mut data_dir = None;
     let mut parent_pid = None;
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "test-credential-target"))]
     let mut credential_target = None;
 
     while let Some(argument) = args.next() {
@@ -106,7 +106,7 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Config, RunErr
                     return Err(invalid());
                 }
             }
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, feature = "test-credential-target"))]
             Some("--credential-target") => {
                 credential_target = Some(
                     args.next()
@@ -123,7 +123,7 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Config, RunErr
         pipe_name,
         data_dir: data_dir.ok_or_else(invalid)?,
         parent_pid,
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "test-credential-target"))]
         credential_target,
     })
 }
@@ -283,13 +283,13 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), RunError> {
 
     fs::create_dir_all(&config.data_dir)?;
     let pid = std::process::id();
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "test-credential-target"))]
     let secret_provider = config
         .credential_target
         .map(WindowsCredentialInstallSecret::for_test_target)
         .transpose()?
         .unwrap_or_default();
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(any(debug_assertions, feature = "test-credential-target")))]
     let secret_provider = WindowsCredentialInstallSecret::default();
     let ipc_server = IpcServer::spawn(&pipe_name, PRODUCT_INSTALL_ID, secret_provider)?;
     let ready_file = ReadyFile::publish(&config.data_dir, pid, &pipe_name)?;
@@ -452,7 +452,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(debug_assertions))]
+    #[cfg(all(not(debug_assertions), not(feature = "test-credential-target")))]
     #[test]
     fn release_parser_rejects_credential_target() {
         let result = super::parse_args(

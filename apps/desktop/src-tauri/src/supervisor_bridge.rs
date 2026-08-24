@@ -15,13 +15,14 @@ use mission_protocol::handshake::{
 };
 use mission_supervisor::single_instance::{current_user_sid, production_pipe_name};
 use serde::Serialize;
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::Foundation::{CloseHandle, ERROR_NOT_FOUND, HANDLE};
 use windows_sys::Win32::System::IO::CancelSynchronousIo;
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, GetCurrentThreadId, OpenThread, THREAD_TERMINATE,
 };
 
 const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(1);
+const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 macro_rules! supervisor_commands {
     ($callback:ident) => {
@@ -225,8 +226,15 @@ impl CancellationTarget {
         Ok(Self(handle))
     }
 
-    fn cancel(&self) {
-        unsafe { CancelSynchronousIo(self.0) };
+    fn cancel(&self) -> io::Result<()> {
+        if unsafe { CancelSynchronousIo(self.0) } != 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(ERROR_NOT_FOUND as i32) {
+            return Ok(());
+        }
+        Err(error)
     }
 }
 
@@ -236,7 +244,7 @@ impl Drop for CancellationTarget {
     }
 }
 
-fn with_io_deadline<T>(
+pub(crate) fn with_io_deadline<T>(
     timeout: Duration,
     operation: impl FnOnce() -> Result<T, BridgeError>,
 ) -> Result<T, BridgeError> {
@@ -244,18 +252,34 @@ fn with_io_deadline<T>(
     let (done_tx, done_rx) = mpsc::channel();
     let watchdog = thread::Builder::new()
         .name("mission-desktop-ipc-watchdog".to_owned())
-        .spawn(move || {
-            if matches!(
-                done_rx.recv_timeout(timeout),
-                Err(mpsc::RecvTimeoutError::Timeout)
-            ) {
-                target.cancel();
+        .spawn(move || -> io::Result<()> {
+            match done_rx.recv_timeout(timeout) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+
+            let mut cancellation_error = None;
+            loop {
+                if let Err(error) = target.cancel()
+                    && cancellation_error.is_none()
+                {
+                    cancellation_error = Some(error);
+                }
+                match done_rx.recv_timeout(CANCELLATION_POLL_INTERVAL) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        return cancellation_error.map_or(Ok(()), Err);
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
             }
         })
         .map_err(|_| BridgeError::Unavailable)?;
     let result = operation();
     let _ = done_tx.send(());
-    watchdog.join().map_err(|_| BridgeError::Unavailable)?;
+    watchdog
+        .join()
+        .map_err(|_| BridgeError::Unavailable)?
+        .map_err(|_| BridgeError::Unavailable)?;
     result
 }
 

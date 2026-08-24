@@ -1,7 +1,8 @@
 #[path = "../src/supervisor_bridge.rs"]
 mod supervisor_bridge;
 
-use std::io::{self, Write};
+use std::fs::OpenOptions;
+use std::io::{self, Read, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::Path;
 use std::ptr;
@@ -10,8 +11,10 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use mission_protocol::frame::read_frame;
-use mission_protocol::handshake::{ClientMessage, InstallSecretProvider, PRODUCT_INSTALL_ID};
+use mission_protocol::frame::{read_frame, write_frame};
+use mission_protocol::handshake::{
+    ClientMessage, InstallSecretProvider, PRODUCT_INSTALL_ID, ServerMessage,
+};
 use mission_supervisor::ipc::IpcServer;
 use windows_sys::Win32::Foundation::{ERROR_PIPE_CONNECTED, GetLastError, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
@@ -71,7 +74,9 @@ fn unique_pipe_name() -> String {
     )
 }
 
-fn spawn_partial_handshake_server(pipe_name: &str) -> (thread::JoinHandle<()>, mpsc::Sender<()>) {
+fn spawn_partial_handshake_server(
+    pipe_name: &str,
+) -> (thread::JoinHandle<()>, mpsc::Sender<()>, mpsc::Receiver<()>) {
     let pipe_path: Vec<u16> = format!(r"\\.\pipe\{pipe_name}")
         .encode_utf16()
         .chain(Some(0))
@@ -91,6 +96,7 @@ fn spawn_partial_handshake_server(pipe_name: &str) -> (thread::JoinHandle<()>, m
     assert_ne!(handle, INVALID_HANDLE_VALUE, "create stalled named pipe");
     let mut pipe = unsafe { std::fs::File::from_raw_handle(handle.cast()) };
     let (release_tx, release_rx) = mpsc::channel();
+    let (partial_tx, partial_rx) = mpsc::channel();
     let server = thread::spawn(move || {
         if unsafe { ConnectNamedPipe(pipe.as_raw_handle().cast(), ptr::null_mut()) } == 0 {
             assert_eq!(unsafe { GetLastError() }, ERROR_PIPE_CONNECTED);
@@ -100,9 +106,28 @@ fn spawn_partial_handshake_server(pipe_name: &str) -> (thread::JoinHandle<()>, m
             .expect("write partial response length");
         pipe.write_all(b"{").expect("write partial response body");
         pipe.flush().expect("flush partial response");
+        let _ = partial_tx.send(());
         let _ = release_rx.recv_timeout(Duration::from_secs(3));
     });
-    (server, release_tx)
+    (server, release_tx, partial_rx)
+}
+
+struct HeaderBoundaryReader {
+    pipe: std::fs::File,
+    header_bytes: usize,
+    delayed: bool,
+}
+
+impl Read for HeaderBoundaryReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.header_bytes == size_of::<u32>() && !self.delayed {
+            self.delayed = true;
+            thread::sleep(Duration::from_millis(300));
+        }
+        let read = self.pipe.read(buffer)?;
+        self.header_bytes = (self.header_bytes + read).min(size_of::<u32>());
+        Ok(read)
+    }
 }
 
 struct StartsThenConnects {
@@ -239,7 +264,7 @@ fn real_transport_caches_the_session_and_reconnects_after_disconnect() {
 #[test]
 fn real_transport_times_out_partial_responses_and_reconnects() {
     let pipe_name = unique_pipe_name();
-    let (stalled_server, release_stall) = spawn_partial_handshake_server(&pipe_name);
+    let (stalled_server, release_stall, _partial_sent) = spawn_partial_handshake_server(&pipe_name);
     let mut transport = LocalSupervisorTransport::for_test(&pipe_name, FixtureSecret);
 
     let started = Instant::now();
@@ -257,6 +282,42 @@ fn real_transport_times_out_partial_responses_and_reconnects() {
     replacement
         .shutdown()
         .expect("stop replacement pipe server");
+}
+
+#[test]
+fn io_deadline_retries_cancellation_across_frame_read_boundary() {
+    let pipe_name = unique_pipe_name();
+    let (stalled_server, release_stall, partial_sent) = spawn_partial_handshake_server(&pipe_name);
+    let mut pipe = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(format!(r"\\.\pipe\{pipe_name}"))
+        .expect("connect boundary fixture pipe");
+    write_frame(&mut pipe, &ClientMessage::Ping).expect("write boundary fixture request");
+    partial_sent
+        .recv_timeout(Duration::from_secs(1))
+        .expect("partial frame is buffered");
+    let mut reader = HeaderBoundaryReader {
+        pipe,
+        header_bytes: 0,
+        delayed: false,
+    };
+
+    let started = Instant::now();
+    let result = supervisor_bridge::with_io_deadline(Duration::from_millis(100), || {
+        read_frame::<_, ServerMessage>(&mut reader)
+            .map(|_| ())
+            .map_err(|_| BridgeError::Unavailable)
+    });
+    let elapsed = started.elapsed();
+
+    let _ = release_stall.send(());
+    stalled_server.join().expect("join boundary fixture server");
+    assert_eq!(result, Err(BridgeError::Unavailable));
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "frame boundary cancellation took {elapsed:?}"
+    );
 }
 
 #[test]
