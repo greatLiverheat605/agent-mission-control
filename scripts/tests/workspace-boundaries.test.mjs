@@ -8,7 +8,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const allowedCargoMembers = new Set(['apps/*/src-tauri', 'crates/*']);
 const canonicalCargoWorkspaceHeader = `[workspace]
 resolver = "2"
-members = []
+members = ["crates/*"]
 
 `;
 
@@ -43,7 +43,7 @@ test('npm workspace members stay inside product app and package directories', as
   assert.ok(packageJson.workspaces.every((member) => !member.toLowerCase().includes('mcp')));
 });
 
-test('Cargo workspace starts with no members', async () => {
+test('Cargo workspace starts with the canonical crate member glob', async () => {
   assertCanonicalCargoWorkspace(await readRootFile('Cargo.toml'));
 });
 
@@ -61,7 +61,7 @@ name = "boundary-bypass"
 description = """
 [workspace]
 resolver = "2"
-members = []
+members = ["crates/*"]
 """
 
 [workspace]
