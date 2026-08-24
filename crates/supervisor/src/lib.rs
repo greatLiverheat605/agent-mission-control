@@ -1,3 +1,5 @@
+#[cfg(windows)]
+pub mod ipc;
 pub mod single_instance;
 
 use std::ffi::OsString;
