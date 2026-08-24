@@ -13,13 +13,10 @@ use mission_protocol::handshake::{
     ClientMessage, HandshakeVerifier, InstallSecretProvider, Pong, ProtocolError,
     ProtocolErrorCode, ServerMessage,
 };
+use mission_protocol::windows_security::{SecurityAttributes, current_user_sid};
 use windows_sys::Win32::Foundation::{
-    ERROR_NO_DATA, ERROR_OPERATION_ABORTED, ERROR_PIPE_CONNECTED, INVALID_HANDLE_VALUE, LocalFree,
+    ERROR_NO_DATA, ERROR_OPERATION_ABORTED, ERROR_PIPE_CONNECTED, INVALID_HANDLE_VALUE,
 };
-use windows_sys::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
-};
-use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_FIRST_PIPE_INSTANCE, FlushFileBuffers, PIPE_ACCESS_DUPLEX,
 };
@@ -28,8 +25,6 @@ use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
-
-use crate::single_instance::current_user_sid;
 
 const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -262,7 +257,7 @@ struct PipeInstance(File);
 
 impl PipeInstance {
     fn create(pipe_path: &str, sid: &str) -> io::Result<Self> {
-        let security = PipeSecurity::for_user(sid)?;
+        let security = SecurityAttributes::from_sddl(&pipe_sddl(sid))?;
         let wide_path: Vec<u16> = pipe_path.encode_utf16().chain(Some(0)).collect();
         let handle = unsafe {
             CreateNamedPipeW(
@@ -273,7 +268,7 @@ impl PipeInstance {
                 PIPE_BUFFER_BYTES,
                 PIPE_BUFFER_BYTES,
                 0,
-                &security.attributes,
+                security.as_ptr(),
             )
         };
         if handle == INVALID_HANDLE_VALUE {
@@ -310,51 +305,8 @@ impl PipeInstance {
     }
 }
 
-struct PipeSecurity {
-    attributes: SECURITY_ATTRIBUTES,
-    descriptor: PSECURITY_DESCRIPTOR,
-}
-
-impl PipeSecurity {
-    fn for_user(sid: &str) -> io::Result<Self> {
-        let sddl = pipe_sddl(sid);
-        let wide_sddl: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
-        let mut descriptor = ptr::null_mut();
-        if unsafe {
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                wide_sddl.as_ptr(),
-                SDDL_REVISION_1,
-                &mut descriptor,
-                ptr::null_mut(),
-            )
-        } == 0
-        {
-            return Err(last_error(
-                "ConvertStringSecurityDescriptorToSecurityDescriptorW",
-            ));
-        }
-
-        Ok(Self {
-            attributes: SECURITY_ATTRIBUTES {
-                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-                lpSecurityDescriptor: descriptor,
-                bInheritHandle: 0,
-            },
-            descriptor,
-        })
-    }
-}
-
 fn pipe_sddl(sid: &str) -> String {
     format!("D:P(A;;GA;;;{sid})")
-}
-
-impl Drop for PipeSecurity {
-    fn drop(&mut self) {
-        unsafe {
-            LocalFree(self.descriptor);
-        }
-    }
 }
 
 fn last_error(operation: &str) -> io::Error {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 export type SupervisorStatus = {
@@ -14,14 +14,17 @@ const supervisorApi = {
 
 export default function App() {
   const [status, setStatus] = useState<SupervisorStatus | null>(null);
+  const pendingRequest = useRef<Promise<SupervisorStatus> | null>(null);
 
   useEffect(() => {
     let active = true;
-    let inFlight = false;
+    let observed: Promise<SupervisorStatus> | null = null;
     const update = (request: () => Promise<SupervisorStatus>) => {
-      if (inFlight) return;
-      inFlight = true;
-      void request()
+      const pending = pendingRequest.current ?? request();
+      pendingRequest.current = pending;
+      if (observed === pending) return;
+      observed = pending;
+      void pending
         .then((nextStatus) => {
           if (active) setStatus(nextStatus);
         })
@@ -31,7 +34,8 @@ export default function App() {
           }
         })
         .finally(() => {
-          inFlight = false;
+          if (pendingRequest.current === pending) pendingRequest.current = null;
+          if (observed === pending) observed = null;
         });
     };
 

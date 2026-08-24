@@ -1,12 +1,24 @@
 #[path = "../src/supervisor_bridge.rs"]
 mod supervisor_bridge;
 
-use std::io;
-use std::sync::Arc;
+use std::io::{self, Write};
+use std::os::windows::io::{AsRawHandle, FromRawHandle};
+use std::path::Path;
+use std::ptr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
+use std::thread;
+use std::time::{Duration, Instant};
 
-use mission_protocol::handshake::{InstallSecretProvider, PRODUCT_INSTALL_ID};
+use mission_protocol::frame::read_frame;
+use mission_protocol::handshake::{ClientMessage, InstallSecretProvider, PRODUCT_INSTALL_ID};
 use mission_supervisor::ipc::IpcServer;
+use windows_sys::Win32::Foundation::{ERROR_PIPE_CONNECTED, GetLastError, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+use windows_sys::Win32::System::Pipes::{
+    ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+    PIPE_TYPE_BYTE, PIPE_WAIT,
+};
 
 use supervisor_bridge::{
     BridgeError, LocalSupervisorTransport, PublicSupervisorStatus, SupervisorBridge,
@@ -57,6 +69,40 @@ fn unique_pipe_name() -> String {
         std::process::id(),
         PIPE_NONCE.fetch_add(1, Ordering::Relaxed)
     )
+}
+
+fn spawn_partial_handshake_server(pipe_name: &str) -> (thread::JoinHandle<()>, mpsc::Sender<()>) {
+    let pipe_path: Vec<u16> = format!(r"\\.\pipe\{pipe_name}")
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let handle = unsafe {
+        CreateNamedPipeW(
+            pipe_path.as_ptr(),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            1,
+            64 * 1024,
+            64 * 1024,
+            0,
+            ptr::null(),
+        )
+    };
+    assert_ne!(handle, INVALID_HANDLE_VALUE, "create stalled named pipe");
+    let mut pipe = unsafe { std::fs::File::from_raw_handle(handle.cast()) };
+    let (release_tx, release_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        if unsafe { ConnectNamedPipe(pipe.as_raw_handle().cast(), ptr::null_mut()) } == 0 {
+            assert_eq!(unsafe { GetLastError() }, ERROR_PIPE_CONNECTED);
+        }
+        let _: ClientMessage = read_frame(&mut pipe).expect("read desktop handshake");
+        pipe.write_all(&32_u32.to_le_bytes())
+            .expect("write partial response length");
+        pipe.write_all(b"{").expect("write partial response body");
+        pipe.flush().expect("flush partial response");
+        let _ = release_rx.recv_timeout(Duration::from_secs(3));
+    });
+    (server, release_tx)
 }
 
 struct StartsThenConnects {
@@ -132,6 +178,20 @@ fn initial_status_starts_the_packaged_supervisor_then_retries() {
 }
 
 #[test]
+fn packaged_supervisor_command_has_an_independent_lifetime() {
+    let data_dir = Path::new(r"C:\ProgramData\Agent Mission Control");
+    let command = supervisor_bridge::packaged_supervisor_command(
+        Path::new("mission-control-supervisor.exe"),
+        data_dir,
+    );
+
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        [std::ffi::OsStr::new("--data-dir"), data_dir.as_os_str()]
+    );
+}
+
+#[test]
 fn async_bridge_runs_blocking_transport_off_the_calling_thread() {
     let bridge = Arc::new(SupervisorBridge::new(ThreadReportingPipe(
         std::thread::current().id(),
@@ -171,6 +231,29 @@ fn real_transport_caches_the_session_and_reconnects_after_disconnect() {
     .expect("start replacement pipe server");
     assert_eq!(transport.ping(), Ok("0.1.0".to_owned()));
     assert_eq!(second_handshakes.load(Ordering::SeqCst), 1);
+    replacement
+        .shutdown()
+        .expect("stop replacement pipe server");
+}
+
+#[test]
+fn real_transport_times_out_partial_responses_and_reconnects() {
+    let pipe_name = unique_pipe_name();
+    let (stalled_server, release_stall) = spawn_partial_handshake_server(&pipe_name);
+    let mut transport = LocalSupervisorTransport::for_test(&pipe_name, FixtureSecret);
+
+    let started = Instant::now();
+    assert_eq!(transport.ping(), Err(BridgeError::Unavailable));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "partial response exceeded the client deadline"
+    );
+
+    let _ = release_stall.send(());
+    stalled_server.join().expect("join stalled pipe server");
+    let replacement = IpcServer::spawn(&pipe_name, PRODUCT_INSTALL_ID, FixtureSecret)
+        .expect("start replacement pipe server");
+    assert_eq!(transport.ping(), Ok("0.1.0".to_owned()));
     replacement
         .shutdown()
         .expect("stop replacement pipe server");

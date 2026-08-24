@@ -1,9 +1,9 @@
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::windows::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -15,7 +15,13 @@ use mission_protocol::handshake::{
 };
 use mission_supervisor::single_instance::{current_user_sid, production_pipe_name};
 use serde::Serialize;
-use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::System::IO::CancelSynchronousIo;
+use windows_sys::Win32::System::Threading::{
+    CREATE_NO_WINDOW, GetCurrentThreadId, OpenThread, THREAD_TERMINATE,
+};
+
+const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(1);
 
 macro_rules! supervisor_commands {
     ($callback:ident) => {
@@ -130,20 +136,24 @@ impl<P: InstallSecretProvider> SupervisorTransport for LocalSupervisorTransport<
             .filter(|path| path.is_file())
             .ok_or(BridgeError::Unavailable)?;
         let data_dir = self.data_dir.as_ref().ok_or(BridgeError::Unavailable)?;
-        let child = Command::new(supervisor_path)
-            .arg("--data-dir")
-            .arg(data_dir)
-            .arg("--parent-pid")
-            .arg(std::process::id().to_string())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
+        let child = packaged_supervisor_command(supervisor_path, data_dir)
             .spawn()
             .map_err(|_| BridgeError::Unavailable)?;
         self.child = Some(child);
         Ok(())
     }
+}
+
+pub(crate) fn packaged_supervisor_command(supervisor_path: &Path, data_dir: &Path) -> Command {
+    let mut command = Command::new(supervisor_path);
+    command
+        .arg("--data-dir")
+        .arg(data_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW);
+    command
 }
 
 impl<P: InstallSecretProvider> LocalSupervisorTransport<P> {
@@ -167,16 +177,19 @@ impl<P: InstallSecretProvider> LocalSupervisorTransport<P> {
             nonce,
             proof,
         });
-        write_frame(&mut pipe, &handshake).map_err(|_| BridgeError::Unavailable)?;
-        match read_frame(&mut pipe).map_err(|_| BridgeError::Unavailable)? {
-            ServerMessage::HandshakeAccepted(accepted)
-                if accepted.protocol_version == PROTOCOL_VERSION =>
-            {
-                Ok(pipe)
+        with_io_deadline(CLIENT_IO_TIMEOUT, || {
+            write_frame(&mut pipe, &handshake).map_err(|_| BridgeError::Unavailable)?;
+            match read_frame(&mut pipe).map_err(|_| BridgeError::Unavailable)? {
+                ServerMessage::HandshakeAccepted(accepted)
+                    if accepted.protocol_version == PROTOCOL_VERSION =>
+                {
+                    Ok(())
+                }
+                ServerMessage::Error(error) => Err(protocol_error(error.code)),
+                _ => Err(BridgeError::Protocol),
             }
-            ServerMessage::Error(error) => Err(protocol_error(error.code)),
-            _ => Err(BridgeError::Protocol),
-        }
+        })?;
+        Ok(pipe)
     }
 }
 
@@ -187,14 +200,63 @@ impl From<io::Error> for BridgeError {
 }
 
 fn ping_session(pipe: &mut File) -> Result<String, BridgeError> {
-    write_frame(&mut *pipe, &ClientMessage::Ping).map_err(|_| BridgeError::Unavailable)?;
-    match read_frame(pipe).map_err(|_| BridgeError::Unavailable)? {
-        ServerMessage::Pong(pong) if pong.protocol_version == PROTOCOL_VERSION => {
-            Ok(pong.supervisor_version)
+    with_io_deadline(CLIENT_IO_TIMEOUT, || {
+        write_frame(&mut *pipe, &ClientMessage::Ping).map_err(|_| BridgeError::Unavailable)?;
+        match read_frame(pipe).map_err(|_| BridgeError::Unavailable)? {
+            ServerMessage::Pong(pong) if pong.protocol_version == PROTOCOL_VERSION => {
+                Ok(pong.supervisor_version)
+            }
+            ServerMessage::Error(error) => Err(protocol_error(error.code)),
+            _ => Err(BridgeError::Protocol),
         }
-        ServerMessage::Error(error) => Err(protocol_error(error.code)),
-        _ => Err(BridgeError::Protocol),
+    })
+}
+
+struct CancellationTarget(HANDLE);
+
+unsafe impl Send for CancellationTarget {}
+
+impl CancellationTarget {
+    fn current() -> io::Result<Self> {
+        let handle = unsafe { OpenThread(THREAD_TERMINATE, 0, GetCurrentThreadId()) };
+        if handle.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self(handle))
     }
+
+    fn cancel(&self) {
+        unsafe { CancelSynchronousIo(self.0) };
+    }
+}
+
+impl Drop for CancellationTarget {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+fn with_io_deadline<T>(
+    timeout: Duration,
+    operation: impl FnOnce() -> Result<T, BridgeError>,
+) -> Result<T, BridgeError> {
+    let target = CancellationTarget::current()?;
+    let (done_tx, done_rx) = mpsc::channel();
+    let watchdog = thread::Builder::new()
+        .name("mission-desktop-ipc-watchdog".to_owned())
+        .spawn(move || {
+            if matches!(
+                done_rx.recv_timeout(timeout),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
+                target.cancel();
+            }
+        })
+        .map_err(|_| BridgeError::Unavailable)?;
+    let result = operation();
+    let _ = done_tx.send(());
+    watchdog.join().map_err(|_| BridgeError::Unavailable)?;
+    result
 }
 
 fn protocol_error(code: ProtocolErrorCode) -> BridgeError {

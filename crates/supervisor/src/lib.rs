@@ -451,4 +451,20 @@ mod tests {
             })
         );
     }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn release_parser_rejects_credential_target() {
+        let result = super::parse_args(
+            [
+                "--data-dir",
+                r"C:\ProgramData\Agent Mission Control",
+                "--credential-target",
+                "test-target",
+            ]
+            .map(Into::into),
+        );
+
+        assert!(matches!(result, Err(super::RunError::InvalidArguments)));
+    }
 }

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { act, cleanup, render, screen } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import App from "./App";
@@ -77,6 +78,18 @@ test("does not queue heartbeats while a native request is in flight", () => {
   expect(invokeMock).toHaveBeenCalledTimes(1);
 });
 
+test("shares the initial request across StrictMode effect replay", () => {
+  invokeMock.mockReturnValue(new Promise(() => undefined));
+
+  render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  );
+
+  expect(invokeMock).toHaveBeenCalledTimes(1);
+});
+
 test("desktop window and capability config keep the renderer restricted", () => {
   const tauriConfig = JSON.parse(
     readFileSync(resolve(process.cwd(), "src-tauri/tauri.conf.json"), "utf8"),
@@ -97,6 +110,12 @@ test("desktop window and capability config keep the renderer restricted", () => 
   expect(tauriConfig.app.security.csp).toMatch(/script-src 'self'/);
   expect(tauriConfig.app.security.csp).not.toMatch(/script-src[^;]*https?:/);
   expect(tauriConfig.app.security.csp).not.toMatch(/127\.0\.0\.1|ws:/);
+  expect(tauriConfig.app.security.csp).not.toMatch(
+    /style-src[^;]*'unsafe-inline'/,
+  );
+  expect(tauriConfig.app.security.devCsp).toMatch(
+    /style-src[^;]*'unsafe-inline'/,
+  );
   expect(tauriConfig.app.security.devCsp).toMatch(
     /http:\/\/127\.0\.0\.1:1420.*ws:\/\/127\.0\.0\.1:1420/,
   );
