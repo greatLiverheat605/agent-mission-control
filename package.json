@@ -1,0 +1,25 @@
+{
+  "name": "agent-mission-control",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "lint": "npm run lint --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "test:contracts": "npm run test:contracts --workspaces --if-present",
+    "test:integration": "npm run test:integration --workspaces --if-present",
+    "test:ui": "npm run test:ui --workspaces --if-present",
+    "test:e2e": "npm run test:e2e --workspaces --if-present",
+    "test:visual": "npm run test:visual --workspaces --if-present",
+    "test:security": "npm run test:security --workspaces --if-present",
+    "scan:secrets": "npm run scan:secrets --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "tauri:dev": "npm run tauri:dev --workspaces --if-present",
+    "tauri:build": "npm run tauri:build --workspaces --if-present",
+    "verify:release": "npm run verify:release --workspaces --if-present"
+  }
+}

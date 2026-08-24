@@ -1,0 +1,25 @@
+# Product dependencies and build output
+node_modules/
+dist/
+target/
+coverage/
+.turbo/
+*.log
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Independent projects and local Codex state
+/MCP/
+/.codex/
