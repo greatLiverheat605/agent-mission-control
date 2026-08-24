@@ -15,7 +15,7 @@ pub struct SequenceRange {
     pub end: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ReadModel {
     pub mission_id: Option<MissionId>,
     pub route_id: Option<RouteId>,
@@ -27,23 +27,6 @@ pub struct ReadModel {
     pub missing_sequences: Vec<SequenceRange>,
     pub compatibility_warnings: Vec<String>,
     pub applied_event_ids: BTreeSet<EventId>,
-}
-
-impl Default for ReadModel {
-    fn default() -> Self {
-        Self {
-            mission_id: None,
-            route_id: None,
-            route_state: None,
-            route_version: 0,
-            contract_version: 0,
-            evidence_matrix: EvidenceMatrix::default(),
-            incomplete: false,
-            missing_sequences: Vec::new(),
-            compatibility_warnings: Vec::new(),
-            applied_event_ids: BTreeSet::new(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -87,7 +70,7 @@ pub fn reduce(current: &ReadModel, event: &EventEnvelope) -> Result<ReadModel, P
         EventKind::RouteStateChanged => {
             next.route_id = Some(event.route_id);
             let state = string(&event.payload, "state", event)?;
-            next.route_state = Some(parse_state(&state).ok_or_else(|| {
+            next.route_state = Some(parse_state(state).ok_or_else(|| {
                 ProjectionError::MalformedPayload(event.event_id, "unknown route state".to_owned())
             })?);
             next.route_version = number(&event.payload, "version", event)?;
