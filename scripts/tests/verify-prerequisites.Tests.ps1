@@ -26,6 +26,22 @@ Describe 'verify-prerequisites.ps1' {
             [IO.File]::WriteAllText((Join-Path $Directory "$Name.cmd"), $body, $utf8)
         }
 
+        function New-SupportedToolchainShims {
+            param(
+                [Parameter(Mandatory)]
+                [string] $Directory,
+
+                [string] $NodeOutput = 'v24.18.0',
+
+                [string] $CargoOutput = 'cargo 1.98.0 (797e8a9bc 2026-08-05)'
+            )
+
+            New-CommandShim -Directory $Directory -Name node -Output $NodeOutput
+            New-CommandShim -Directory $Directory -Name git -Output 'git version 2.55.0.windows.3'
+            New-CommandShim -Directory $Directory -Name rustc -Output 'rustc 1.98.0 (88d9e12ae 2026-08-18)'
+            New-CommandShim -Directory $Directory -Name cargo -Output $CargoOutput
+        }
+
         function Invoke-PrerequisiteVerification {
             param(
                 [Parameter(Mandatory)]
@@ -80,20 +96,41 @@ Describe 'verify-prerequisites.ps1' {
     }
 
     It 'reports explicit statuses for the supported Windows toolchain' {
-        New-CommandShim -Directory $shimPath -Name node -Output 'v24.18.0'
-        New-CommandShim -Directory $shimPath -Name git -Output 'git version 2.55.0.windows.3'
-        New-CommandShim -Directory $shimPath -Name rustc -Output 'rustc 1.98.0 (88d9e12ae 2026-08-18)'
-        New-CommandShim -Directory $shimPath -Name cargo -Output 'cargo 1.98.0 (797e8a9bc 2026-08-05)'
+        New-SupportedToolchainShims -Directory $shimPath
 
         $result = Invoke-PrerequisiteVerification -ShimPath $shimPath
 
         $result.ExitCode | Should -Be 0
         $json = $result.StdOut | ConvertFrom-Json
+        @($json.PSObject.Properties.Name) -join ',' | Should -Be 'ok,node,git,rust,cargo,pester,webview2,messages'
         $json.node.major | Should -Be 24
         $json.pester.major | Should -BeGreaterOrEqual 5
         foreach ($name in 'node', 'git', 'rust', 'cargo', 'pester', 'webview2') {
             $json.$name.status | Should -Be 'ok'
         }
+    }
+
+    It 'reports invalid cargo version output as unsupported JSON' {
+        New-SupportedToolchainShims -Directory $shimPath -CargoOutput 'cargo output without a version'
+
+        $result = Invoke-PrerequisiteVerification -ShimPath $shimPath -SkipWebView2
+
+        $result.ExitCode | Should -Be 1
+        $json = $result.StdOut | ConvertFrom-Json
+        $json.cargo.status | Should -Be 'unsupported'
+        $json.messages -join ' ' | Should -Match 'Cargo.*unsupported version output'
+    }
+
+    It 'reports an oversized node major as unsupported JSON' {
+        New-SupportedToolchainShims -Directory $shimPath -NodeOutput 'v999999999999999999999999.0.0'
+
+        $result = Invoke-PrerequisiteVerification -ShimPath $shimPath -SkipWebView2
+
+        $result.ExitCode | Should -Be 1
+        $result.StdErr | Should -BeNullOrEmpty
+        $json = $result.StdOut | ConvertFrom-Json
+        $json.node.status | Should -Be 'unsupported'
+        $json.messages -join ' ' | Should -Match 'Node.js.*unsupported version output'
     }
 
     AfterAll {

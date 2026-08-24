@@ -32,7 +32,10 @@ function Test-CommandVersion {
         [string] $Name,
 
         [Parameter(Mandatory)]
-        [string] $DisplayName
+        [string] $DisplayName,
+
+        [Parameter(Mandatory)]
+        [string] $VersionPattern
     )
 
     $command = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -48,9 +51,11 @@ function Test-CommandVersion {
     }
 
     $version = ($output -join ' ').Trim()
-    $major = $null
-    if ($version -match '(?<!\d)(\d+)\.') {
-        $major = [int] $Matches[1]
+    $match = [regex]::Match($version, $VersionPattern)
+    $major = 0
+    if (-not $match.Success -or -not [int]::TryParse($match.Groups['major'].Value, [ref] $major)) {
+        $messages.Add("$DisplayName returned unsupported version output: $version")
+        return New-CheckResult -Status unsupported -Version $version -Path $command.Source
     }
 
     New-CheckResult -Status ok -Version $version -Major $major -Path $command.Source
@@ -104,15 +109,15 @@ function Test-WebView2Runtime {
     New-CheckResult -Status missing
 }
 
-$node = Test-CommandVersion -Name node -DisplayName Node.js
+$node = Test-CommandVersion -Name node -DisplayName Node.js -VersionPattern '^v(?<major>\d+)\.'
 if ($node.status -eq 'ok' -and $node.major -ne 24) {
     $node.status = 'unsupported'
     $messages.Add("Node.js 24 is required; found $($node.version).")
 }
 
-$git = Test-CommandVersion -Name git -DisplayName Git
-$rust = Test-CommandVersion -Name rustc -DisplayName Rust
-$cargo = Test-CommandVersion -Name cargo -DisplayName Cargo
+$git = Test-CommandVersion -Name git -DisplayName Git -VersionPattern '^git version (?<major>\d+)\.'
+$rust = Test-CommandVersion -Name rustc -DisplayName Rust -VersionPattern '^rustc (?<major>\d+)\.'
+$cargo = Test-CommandVersion -Name cargo -DisplayName Cargo -VersionPattern '^cargo (?<major>\d+)\.'
 $pester = Test-PesterVersion
 $webview2 = Test-WebView2Runtime
 

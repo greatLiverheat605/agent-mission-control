@@ -40,9 +40,16 @@ Get-Module -ListAvailable Pester |
 
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 & $vswhere -version '[17.0,18.0)' -products Microsoft.VisualStudio.Product.BuildTools `
-    -requires Microsoft.VisualStudio.Workload.VCTools Microsoft.VisualStudio.Component.Windows10SDK `
+    -requires Microsoft.VisualStudio.Workload.VCTools `
     -property installationPath
+
+Get-ChildItem (Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Lib') -Directory |
+    Where-Object Name -Match '^\d+\.\d+\.\d+\.\d+$' |
+    Sort-Object { [version] $_.Name } -Descending |
+    Select-Object -ExpandProperty Name
 ```
+
+Windows 10 and Windows 11 SDK releases both use the `Windows Kits\10` directory layout.
 
 Use `npm.cmd`, including in scripts and CI commands. Windows PowerShell can resolve bare `npm` to `npm.ps1`, which fails on machines with a restrictive execution policy.
 
