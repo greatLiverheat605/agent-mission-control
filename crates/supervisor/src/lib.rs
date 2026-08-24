@@ -15,6 +15,7 @@ use single_instance::{AcquireResult, SingleInstance, current_user_sid, productio
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 static READY_NONCE: AtomicU64 = AtomicU64::new(0);
+const READY_TEMP_CREATE_ATTEMPTS: usize = 16;
 
 #[derive(Debug)]
 pub enum RunError {
@@ -158,7 +159,8 @@ fn write_ready_file(data_dir: &std::path::Path, pid: u32, pipe_name: &str) -> io
 
     let ready =
         serde_json::to_vec(&json!({ "pid": pid, "pipe": pipe_name })).map_err(io::Error::other)?;
-    let (temp_path, mut temp) = loop {
+    let mut created_temp = None;
+    for _ in 0..READY_TEMP_CREATE_ATTEMPTS {
         let temp_path = data_dir.join(format!(
             "supervisor.ready.{pid}.{}.tmp",
             READY_NONCE.fetch_add(1, Ordering::Relaxed)
@@ -168,11 +170,20 @@ fn write_ready_file(data_dir: &std::path::Path, pid: u32, pipe_name: &str) -> io
             .create_new(true)
             .open(&temp_path)
         {
-            Ok(temp) => break (temp_path, temp),
+            Ok(temp) => {
+                created_temp = Some((temp_path, temp));
+                break;
+            }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
         }
-    };
+    }
+    let (temp_path, mut temp) = created_temp.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "ready temp create attempts exhausted",
+        )
+    })?;
     let publish = (|| {
         temp.write_all(&ready)?;
         temp.flush()?;
@@ -186,18 +197,26 @@ fn write_ready_file(data_dir: &std::path::Path, pid: u32, pipe_name: &str) -> io
     publish
 }
 
-struct ReadyFile(PathBuf);
+struct ReadyFile(Option<PathBuf>);
 
 impl ReadyFile {
     fn publish(data_dir: &std::path::Path, pid: u32, pipe_name: &str) -> io::Result<Self> {
         write_ready_file(data_dir, pid, pipe_name)?;
-        Ok(Self(data_dir.join("supervisor.ready")))
+        Ok(Self(Some(data_dir.join("supervisor.ready"))))
+    }
+
+    fn cleanup(mut self) -> io::Result<()> {
+        remove_file_if_exists(self.0.as_ref().expect("ready path is armed"))?;
+        self.0 = None;
+        Ok(())
     }
 }
 
 impl Drop for ReadyFile {
     fn drop(&mut self) {
-        let _ = remove_file_if_exists(&self.0);
+        if let Some(path) = &self.0 {
+            let _ = remove_file_if_exists(path);
+        }
     }
 }
 
@@ -213,7 +232,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), RunError> {
 
     fs::create_dir_all(&config.data_dir)?;
     let pid = std::process::id();
-    let _ready_file = ReadyFile::publish(&config.data_dir, pid, &pipe_name)?;
+    let ready_file = ReadyFile::publish(&config.data_dir, pid, &pipe_name)?;
     let mut stdout = io::stdout().lock();
     serde_json::to_writer(
         &mut stdout,
@@ -227,6 +246,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), RunError> {
     }
 
     write_stopped_log(&mut stdout, pid, &pipe_name)?;
+    ready_file.cleanup()?;
     Ok(())
 }
 
@@ -297,7 +317,45 @@ mod tests {
         .expect("ready is valid JSON");
         assert_eq!(ready["pid"], 42);
 
-        fs::remove_dir_all(data_dir).expect("remove test data dir");
+        fs::remove_file(data_dir.join("supervisor.ready")).expect("remove published ready");
+        fs::remove_file(data_dir.join("supervisor.ready.42.0.tmp"))
+            .expect("remove seeded stale temp");
+        fs::remove_dir(data_dir).expect("remove empty test data dir");
+    }
+
+    #[test]
+    fn temp_nonce_retry_returns_error_after_a_finite_limit() {
+        const EXPECTED_ATTEMPTS: u64 = 16;
+
+        let _serial = READY_TEST_LOCK.lock().expect("lock ready tests");
+        READY_NONCE.store(0, Ordering::Relaxed);
+        let data_dir = std::env::temp_dir().join(format!(
+            "mission-supervisor-ready-exhausted-{}-{}",
+            std::process::id(),
+            TEST_NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&data_dir).expect("create test data dir");
+        let stale_paths: Vec<_> = (0..EXPECTED_ATTEMPTS)
+            .map(|nonce| data_dir.join(format!("supervisor.ready.42.{nonce}.tmp")))
+            .collect();
+        for path in &stale_paths {
+            fs::write(path, b"stale").expect("seed stale temp");
+        }
+
+        let error_kind = write_ready_file(&data_dir, 42, "test-pipe")
+            .err()
+            .map(|error| error.kind());
+
+        let ready_path = data_dir.join("supervisor.ready");
+        if ready_path.exists() {
+            fs::remove_file(ready_path).expect("remove unexpectedly published ready");
+        }
+        for path in stale_paths {
+            fs::remove_file(path).expect("remove seeded stale temp");
+        }
+        fs::remove_dir(data_dir).expect("remove empty test data dir");
+
+        assert_eq!(error_kind, Some(std::io::ErrorKind::AlreadyExists));
     }
 
     #[test]

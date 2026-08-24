@@ -2,6 +2,7 @@
 
 use std::fs::{self, File};
 use std::io::Read;
+use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -257,6 +258,48 @@ fn output_error_after_ready_publish_removes_the_ready_file() {
     );
 
     fs::remove_dir_all(&data_dir).expect("remove isolated test data dir");
+}
+
+#[test]
+fn graceful_shutdown_propagates_ready_cleanup_failure() {
+    let _serial = PROCESS_TEST_LOCK.lock().expect("lock process tests");
+    let data_dir = unique_test_dir();
+    fs::create_dir_all(&data_dir).expect("create isolated test data dir");
+    let ready_path = data_dir.join("supervisor.ready");
+    let mut process =
+        TestProcess::spawn_process_group("mission-control-cleanup-failure-test", &data_dir);
+    wait_for_ready(
+        &ready_path,
+        process.id(),
+        "mission-control-cleanup-failure-test",
+    );
+    let locked_ready = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&ready_path)
+        .expect("open ready without delete sharing");
+
+    process.send_ctrl_break();
+    let status = process
+        .wait_for_exit(Duration::from_secs(2))
+        .expect("supervisor exits within two seconds");
+    let stdout = process.read_stdout();
+    let stderr = process.read_stderr();
+    let ready_remained = ready_path.exists();
+    drop(locked_ready);
+    fs::remove_file(&ready_path).expect("remove locked ready after releasing handle");
+    fs::remove_dir_all(&data_dir).expect("remove isolated test data dir");
+
+    assert!(stdout.contains("\"event\":\"supervisor.stopped\""));
+    assert!(
+        ready_remained,
+        "failed cleanup leaves the ready path in place"
+    );
+    assert_ne!(
+        status.code(),
+        Some(0),
+        "ready cleanup failure must not report successful exit; stderr={stderr}"
+    );
 }
 
 #[test]
