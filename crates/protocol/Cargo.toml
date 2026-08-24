@@ -3,6 +3,10 @@ name = "mission-protocol"
 version = "0.1.0"
 edition.workspace = true
 
+[[bin]]
+name = "mission-protocol-export"
+path = "src/bin/protocol_export.rs"
+
 [dependencies]
 hmac = "0.12"
 serde.workspace = true

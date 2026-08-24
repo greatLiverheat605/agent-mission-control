@@ -1,0 +1,11 @@
+{
+  "name": "@mission-control/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:contracts": "node --test ../../tests/contract/protocol-bindings.test.mjs",
+    "typecheck": "tsc --noEmit --project tsconfig.json"
+  }
+}
+
