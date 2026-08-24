@@ -1,5 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { BasicMissionFlight } from "./features/mission/BasicMissionFlight";
+import { NewMission, type MissionDraft } from "./features/onboarding/NewMission";
+import { emptyMission, type MissionEvent } from "../../../packages/mission-store/src";
 
 export type SupervisorStatus = {
   connection: "connected" | "disconnected";
@@ -14,6 +17,8 @@ const supervisorApi = {
 
 export default function App() {
   const [status, setStatus] = useState<SupervisorStatus | null>(null);
+  const [draft, setDraft] = useState<MissionDraft | null>(null);
+  const mission = useMemo(() => draft ? { ...emptyMission("local-mission"), phase: "Contract review", status: "idle" as const, currentAction: "Confirm the read-only contract" } : null, [draft]);
   const pendingRequest = useRef<Promise<SupervisorStatus> | null>(null);
 
   useEffect(() => {
@@ -60,17 +65,10 @@ export default function App() {
   }
   const state = status?.connection ?? "connecting";
 
-  return (
-    <main
-      className={`supervisor-shell state-${state}`}
-      role="status"
-      aria-live="polite"
-      tabIndex={0}
-    >
-      <div className="signal-track" aria-hidden="true">
-        <span />
-      </div>
-      <span>{message}</span>
+  return <>
+    <main className={`supervisor-shell state-${state}`} role="status" aria-live="polite" tabIndex={0}>
+      <div className="signal-track" aria-hidden="true"><span /></div><span>{message}</span>
     </main>
-  );
+    {status?.connection === "connected" && <div className="mission-workspace">{mission ? <BasicMissionFlight mission={mission} events={[] as MissionEvent[]} onPause={() => undefined} /> : <NewMission onCreate={setDraft} />}</div>}
+  </>;
 }

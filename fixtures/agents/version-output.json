@@ -1,0 +1,6 @@
+{
+  "codex": { "version": "codex 1.2.3", "state": "installed" },
+  "claude": { "version": "Claude Code 1.0.0", "state": "installed" },
+  "opencode": { "version": "opencode 0.1.0", "state": "detected_not_runnable" },
+  "zcode": { "version": "zcode 0.1.0", "state": "detected_not_runnable" }
+}

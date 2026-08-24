@@ -2,8 +2,11 @@
 pub mod event_pipeline;
 #[cfg(windows)]
 pub mod ipc;
+pub mod mission_actor;
 #[cfg(windows)]
 pub mod package_smoke;
+pub mod pause;
+pub mod process_tree;
 pub mod single_instance;
 
 use std::ffi::OsString;

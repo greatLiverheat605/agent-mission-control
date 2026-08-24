@@ -1,0 +1,8 @@
+{"type":"thread.started","id":"t1"}
+{"type":"turn.started","id":"turn1"}
+{"type":"approval.requested","id":"approval1","reason":"write file"}
+{"type":"item.tool_call","id":"tool1","name":"read_file"}
+{"type":"tool.result","id":"tool1","ok":true}
+{"type":"file.diff","path":"README.md","patch":"@@"}
+{"type":"turn.completed","id":"turn1"}
+{"type":"unknown.future_event","opaque":{"preserve":true}}

@@ -29,6 +29,7 @@ macro_rules! supervisor_commands {
         $callback!(supervisor_status, ping_supervisor)
     };
 }
+#[allow(unused_imports)]
 pub(crate) use supervisor_commands;
 
 macro_rules! command_names {
@@ -38,6 +39,72 @@ macro_rules! command_names {
 }
 
 pub const ALLOWED_COMMANDS: [&str; 2] = supervisor_commands!(command_names);
+
+macro_rules! mission_commands {
+    ($callback:ident) => {
+        $callback!(
+            create_mission,
+            update_mission_contract,
+            launch_route,
+            subscribe_mission,
+            request_safe_pause,
+            force_terminate
+        )
+    };
+}
+#[allow(unused_imports)]
+pub(crate) use mission_commands;
+#[allow(dead_code)]
+pub const MISSION_ALLOWED_COMMANDS: [&str; 6] = mission_commands!(command_names);
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MissionCommandRequest {
+    pub mission_id: Option<String>,
+    pub route_id: Option<String>,
+    pub expected_version: Option<u64>,
+    pub project_root: Option<String>,
+    pub goal: Option<String>,
+    pub reason: Option<String>,
+    pub confirmation_token: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MissionCommandResult {
+    pub accepted: bool,
+    pub mission_id: Option<String>,
+    pub sequence: Option<u64>,
+    pub error_code: Option<&'static str>,
+}
+
+#[allow(dead_code)]
+pub fn validate_mission_request(request: &MissionCommandRequest) -> Result<(), &'static str> {
+    if request
+        .project_root
+        .as_ref()
+        .is_some_and(|value| value.len() > 4096)
+    {
+        return Err("PROJECT_ROOT_TOO_LONG");
+    }
+    if request
+        .goal
+        .as_ref()
+        .is_some_and(|value| value.len() > 32_000)
+    {
+        return Err("GOAL_TOO_LONG");
+    }
+    if request
+        .confirmation_token
+        .as_ref()
+        .is_some_and(|value| value.len() > 256)
+    {
+        return Err("CONFIRMATION_TOKEN_TOO_LONG");
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BridgeError {
