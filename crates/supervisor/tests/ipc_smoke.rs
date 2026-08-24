@@ -2,6 +2,10 @@
 
 use std::fs::{File, OpenOptions};
 use std::io;
+use std::os::windows::io::FromRawHandle;
+use std::ptr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -12,6 +16,11 @@ use mission_protocol::handshake::{
     ProtocolErrorCode, ServerMessage, handshake_proof,
 };
 use mission_supervisor::ipc::IpcServer;
+use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
+use windows_sys::Win32::System::Pipes::{
+    CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+};
 
 const INSTALL_ID: &str = "9f3628e6-2c77-4815-91cc-213e92e07726";
 const FIXTURE_SECRET: &[u8] = b"phase-1-ipc-fixture-secret-never-log";
@@ -62,6 +71,24 @@ fn handshake(index: u8, versions: Vec<u32>) -> ClientMessage {
 fn exchange(pipe: &mut File, message: &ClientMessage) -> ServerMessage {
     write_frame(&mut *pipe, message).expect("write client frame");
     read_frame(pipe).expect("read server frame")
+}
+
+fn try_create_first_instance(pipe_name: &str) -> Option<File> {
+    let path = format!(r"\\.\pipe\{pipe_name}");
+    let wide_path: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+    let handle = unsafe {
+        CreateNamedPipeW(
+            wide_path.as_ptr(),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            1,
+            4096,
+            4096,
+            0,
+            ptr::null(),
+        )
+    };
+    (handle != INVALID_HANDLE_VALUE).then(|| unsafe { File::from_raw_handle(handle.cast()) })
 }
 
 fn assert_shutdown_completes_while_client_stalls(prepare_client: impl FnOnce(&mut File)) {
@@ -232,4 +259,52 @@ fn disconnect_before_server_accept_does_not_stop_the_accept_loop() {
     ));
     drop(next_client);
     server.shutdown().expect("stop pipe server");
+}
+
+#[test]
+fn server_keeps_first_instance_ownership_between_connections() {
+    let pipe_name = unique_pipe_name();
+    let server = IpcServer::spawn(&pipe_name, INSTALL_ID, FixtureSecret)
+        .expect("start authenticated local pipe server");
+    let stop = Arc::new(AtomicBool::new(false));
+    let hijacked = Arc::new(AtomicBool::new(false));
+    let attacker_stop = Arc::clone(&stop);
+    let attacker_hijacked = Arc::clone(&hijacked);
+    let attacker_pipe_name = pipe_name.clone();
+    let attacker = thread::spawn(move || {
+        while !attacker_stop.load(Ordering::SeqCst) {
+            if let Some(first_instance) = try_create_first_instance(&attacker_pipe_name) {
+                attacker_hijacked.store(true, Ordering::SeqCst);
+                while !attacker_stop.load(Ordering::SeqCst) {
+                    thread::yield_now();
+                }
+                drop(first_instance);
+                return;
+            }
+            thread::yield_now();
+        }
+    });
+
+    for _ in 0..200 {
+        let mut client = connect(&pipe_name);
+        assert!(matches!(
+            exchange(&mut client, &ClientMessage::Ping),
+            ServerMessage::Error(_)
+        ));
+        drop(client);
+        thread::sleep(Duration::from_millis(1));
+        if hijacked.load(Ordering::SeqCst) {
+            break;
+        }
+    }
+
+    stop.store(true, Ordering::SeqCst);
+    attacker.join().expect("join first-instance attacker");
+    let was_hijacked = hijacked.load(Ordering::SeqCst);
+    let was_running = server.is_running();
+    let shutdown = server.shutdown();
+
+    assert!(!was_hijacked, "server released its last pipe handle");
+    assert!(was_running, "first-instance contention stopped the server");
+    shutdown.expect("stop pipe server");
 }
