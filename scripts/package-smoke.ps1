@@ -126,6 +126,28 @@ function Expand-MsiArtifact {
     }
 }
 
+function Test-FileContainsFixtureSecret {
+    param([Parameter(Mandatory)][string] $Path)
+
+    $chunkSize = 65536
+    $overlapLength = 'mission-control-fixture-secret'.Length - 1
+    $buffer = New-Object byte[] $chunkSize
+    $carry = ''
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $window = $carry + [Text.Encoding]::ASCII.GetString($buffer, 0, $read)
+            if ($window -match '(?i)mission-control-fixture-secret|fixture[-_]secret') {
+                return $true
+            }
+            $carry = $window.Substring([Math]::Max(0, $window.Length - $overlapLength))
+        }
+    } finally {
+        $stream.Dispose()
+    }
+    $false
+}
+
 function Assert-PackageContents {
     param([Parameter(Mandatory)][string] $Root)
 
@@ -146,11 +168,8 @@ function Assert-PackageContents {
         Throw-PackageSmokeFailure -Code 'PACKAGE_FORBIDDEN_SECRET' -Message 'The package contains fixture secret material.'
     }
 
-    $textExtensions = @('.css', '.html', '.js', '.json', '.toml', '.txt', '.xml', '.yaml', '.yml')
     foreach ($file in Get-ChildItem -LiteralPath $Root -File -Recurse -Force) {
-        if ($textExtensions -notcontains $file.Extension.ToLowerInvariant()) { continue }
-        $text = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($file.FullName))
-        if ($text -match '(?i)mission-control-fixture-secret|fixture[-_]secret') {
+        if (Test-FileContainsFixtureSecret -Path $file.FullName) {
             Throw-PackageSmokeFailure -Code 'PACKAGE_FORBIDDEN_SECRET' -Message 'The package contains fixture secret material.'
         }
     }
@@ -265,6 +284,55 @@ function Write-UInt32LittleEndian {
     $Stream.Write($bytes, 0, $bytes.Length)
 }
 
+function Wait-StreamTaskWithDeadline {
+    param(
+        [Parameter(Mandatory)]
+        [Threading.Tasks.Task] $Task,
+
+        [Parameter(Mandatory)]
+        [IO.Stream] $Stream,
+
+        [Parameter(Mandatory)]
+        [Threading.CancellationTokenSource] $CancellationSource,
+
+        [Parameter(Mandatory)]
+        [Diagnostics.Stopwatch] $Stopwatch,
+
+        [Parameter(Mandatory)]
+        [int] $TimeoutMilliseconds,
+
+        [Parameter(Mandatory)]
+        [string] $Operation
+    )
+
+    $remaining = $TimeoutMilliseconds - [int] $Stopwatch.ElapsedMilliseconds
+    $completed = $false
+    if ($remaining -gt 0) {
+        try {
+            $completed = $Task.Wait($remaining)
+        } catch [AggregateException] {
+            $completed = $true
+        }
+    }
+    if ($completed) {
+        [void] $Task.GetAwaiter().GetResult()
+        return
+    }
+
+    $CancellationSource.Cancel()
+    $Stream.Dispose()
+    $settled = $false
+    try {
+        $settled = $Task.Wait(5000)
+    } catch [AggregateException] {
+        $settled = $true
+    }
+    if (-not $settled -or -not $Task.IsCompleted) {
+        throw [TimeoutException]::new("Pipe $Operation did not stop after timing out.")
+    }
+    throw [TimeoutException]::new("Pipe $Operation timed out.")
+}
+
 function New-HandshakeProof {
     param(
         [Parameter(Mandatory)]
@@ -303,14 +371,33 @@ function Write-Frame {
         [IO.Stream] $Stream,
 
         [Parameter(Mandatory)]
-        $Message
+        $Message,
+
+        [Parameter(Mandatory)]
+        [int] $TimeoutMilliseconds
     )
 
     $utf8 = New-Object Text.UTF8Encoding -ArgumentList $false
     $payload = $utf8.GetBytes(($Message | ConvertTo-Json -Depth 8 -Compress))
-    Write-UInt32LittleEndian -Stream $Stream -Value $payload.Length
-    $Stream.Write($payload, 0, $payload.Length)
-    $Stream.Flush()
+    $length = [BitConverter]::GetBytes([uint32] $payload.Length)
+    if (-not [BitConverter]::IsLittleEndian) { [Array]::Reverse($length) }
+    $frame = New-Object byte[] ($length.Length + $payload.Length)
+    [Array]::Copy($length, 0, $frame, 0, $length.Length)
+    [Array]::Copy($payload, 0, $frame, $length.Length, $payload.Length)
+
+    $cancellation = New-Object Threading.CancellationTokenSource
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $write = $Stream.WriteAsync($frame, 0, $frame.Length, $cancellation.Token)
+        Wait-StreamTaskWithDeadline -Task $write -Stream $Stream -CancellationSource $cancellation `
+            -Stopwatch $stopwatch -TimeoutMilliseconds $TimeoutMilliseconds -Operation 'write'
+        $flush = $Stream.FlushAsync($cancellation.Token)
+        Wait-StreamTaskWithDeadline -Task $flush -Stream $Stream -CancellationSource $cancellation `
+            -Stopwatch $stopwatch -TimeoutMilliseconds $TimeoutMilliseconds -Operation 'flush'
+    } finally {
+        $stopwatch.Stop()
+        $cancellation.Dispose()
+    }
 }
 
 function Read-Exact {
@@ -403,7 +490,7 @@ function Invoke-ProtocolHandshake {
             ([IO.Pipes.PipeDirection]::InOut), ([IO.Pipes.PipeOptions]::Asynchronous)
         $pipe.Connect($TimeoutMilliseconds)
 
-        Write-Frame -Stream $pipe -Message ([ordered]@{
+        Write-Frame -Stream $pipe -TimeoutMilliseconds $TimeoutMilliseconds -Message ([ordered]@{
                 type = 'Handshake'
                 payload = [ordered]@{
                     install_id = $productInstallId
@@ -417,7 +504,7 @@ function Invoke-ProtocolHandshake {
             throw [IO.InvalidDataException]::new('The sidecar rejected protocol v1 authentication.')
         }
 
-        Write-Frame -Stream $pipe -Message ([ordered]@{ type = 'Ping' })
+        Write-Frame -Stream $pipe -TimeoutMilliseconds $TimeoutMilliseconds -Message ([ordered]@{ type = 'Ping' })
         $pong = Read-Frame -Stream $pipe -TimeoutMilliseconds $TimeoutMilliseconds
         if ($pong.type -ne 'Pong' -or $pong.payload.protocol_version -ne $protocolVersion) {
             throw [IO.InvalidDataException]::new('The sidecar did not return a protocol v1 Pong.')
@@ -463,6 +550,18 @@ function Start-BundledSupervisor {
         Throw-PackageSmokeFailure -Code 'PACKAGE_HANDSHAKE_FAILED' -Message 'The bundled Supervisor did not start.'
     }
     $process
+}
+
+function Invoke-BestEffortCleanup {
+    param([Parameter(Mandatory)][object[]] $Actions)
+
+    foreach ($action in $Actions) {
+        try {
+            [void] (& $action.Action)
+        } catch {
+            "$($action.Name): $($_.Exception.Message)"
+        }
+    }
 }
 
 try {
@@ -523,31 +622,64 @@ try {
 } catch {
     $failure = $_
 } finally {
-    try {
-        if ($supervisorProcess -and -not $supervisorProcess.HasExited) {
-            Stop-Process -Id $supervisorProcess.Id -Force -ErrorAction Stop
-            if (-not $supervisorProcess.WaitForExit(5000)) {
-                Throw-PackageSmokeFailure -Code 'PACKAGE_CLEANUP_FAILED' -Message 'The bundled Supervisor did not exit during cleanup.'
+    $cleanupActions = @(
+        [pscustomobject]@{
+            Name = 'supervisor'
+            Action = {
+                try {
+                    if ($script:supervisorProcess -and -not $script:supervisorProcess.HasExited) {
+                        Stop-Process -Id $script:supervisorProcess.Id -Force -ErrorAction Stop
+                        if (-not $script:supervisorProcess.WaitForExit(5000)) {
+                            throw 'The bundled Supervisor did not exit during cleanup.'
+                        }
+                    }
+                } finally {
+                    if ($script:supervisorProcess) { $script:supervisorProcess.Dispose() }
+                }
             }
         }
-        if ($installerProcess -and -not $installerProcess.HasExited) {
-            Stop-Process -Id $installerProcess.Id -Force -ErrorAction Stop
-            [void] $installerProcess.WaitForExit(5000)
+        [pscustomobject]@{
+            Name = 'installer'
+            Action = {
+                try {
+                    if ($script:installerProcess -and -not $script:installerProcess.HasExited) {
+                        Stop-Process -Id $script:installerProcess.Id -Force -ErrorAction Stop
+                        if (-not $script:installerProcess.WaitForExit(5000)) {
+                            throw 'The MSI installer did not exit during cleanup.'
+                        }
+                    }
+                } finally {
+                    if ($script:installerProcess) { $script:installerProcess.Dispose() }
+                }
+            }
         }
-        if ($credentialStateKnown -and -not $credentialExisted) {
-            [PackageSmokeCredential]::DeleteIfPresent($CredentialTarget)
+        [pscustomobject]@{
+            Name = 'credential'
+            Action = {
+                if ($script:credentialStateKnown -and -not $script:credentialExisted) {
+                    [PackageSmokeCredential]::DeleteIfPresent($script:CredentialTarget)
+                }
+            }
         }
-        if (Test-Path -LiteralPath $workRoot) {
-            Remove-Item -LiteralPath $workRoot -Recurse -Force
+        [pscustomobject]@{
+            Name = 'temp'
+            Action = {
+                if (Test-Path -LiteralPath $script:workRoot) {
+                    Remove-Item -LiteralPath $script:workRoot -Recurse -Force
+                }
+            }
         }
-    } catch {
-        $failure = $_
-        if ($failure.Exception.Data['PackageSmokeCode'] -eq $null) {
-            $failure.Exception.Data['PackageSmokeCode'] = 'PACKAGE_CLEANUP_FAILED'
+    )
+    $cleanupErrors = @(Invoke-BestEffortCleanup -Actions $cleanupActions)
+    if ($cleanupErrors.Count -gt 0) {
+        $originalCode = if ($failure) { Get-FailureCode -ErrorRecord $failure } else { 'none' }
+        try {
+            Throw-PackageSmokeFailure -Code 'PACKAGE_CLEANUP_FAILED' `
+                -Message "Package cleanup failed: $($cleanupErrors -join '; '); original=$originalCode."
+        } catch {
+            $failure = $_
         }
     }
-    if ($supervisorProcess) { $supervisorProcess.Dispose() }
-    if ($installerProcess) { $installerProcess.Dispose() }
 }
 
 if ($failure) {

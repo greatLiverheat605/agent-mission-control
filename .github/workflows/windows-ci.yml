@@ -83,6 +83,8 @@ jobs:
 
       - name: Build unsigned Tauri package
         shell: powershell
+        env:
+          CARGO_NET_OFFLINE: "true"
         run: npm.cmd run tauri:build
 
       - name: Verify installed package
