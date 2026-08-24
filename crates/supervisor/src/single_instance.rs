@@ -1,11 +1,17 @@
 use std::io;
+use std::mem::MaybeUninit;
 use std::ptr;
 
 use sha2::{Digest, Sha256};
-use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, LocalFree,
+};
+use windows_sys::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+};
 use windows_sys::Win32::Security::{
     GetSidIdentifierAuthority, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
-    IsValidSid, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    IsValidSid, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::System::Threading::{
     CreateMutexW, GetCurrentProcess, OpenProcessToken, ReleaseMutex,
@@ -45,7 +51,7 @@ fn user_sid_from_token(token: HANDLE) -> io::Result<String> {
         return Err(last_error("GetTokenInformation(size)"));
     }
 
-    let mut buffer = vec![0_u8; required_bytes as usize];
+    let mut buffer = aligned_token_buffer(required_bytes);
     if unsafe {
         GetTokenInformation(
             token,
@@ -59,8 +65,15 @@ fn user_sid_from_token(token: HANDLE) -> io::Result<String> {
         return Err(last_error("GetTokenInformation(user)"));
     }
 
-    let token_user = unsafe { ptr::read_unaligned(buffer.as_ptr().cast::<TOKEN_USER>()) };
-    sid_to_string(token_user.User.Sid)
+    let token_user = unsafe { buffer.as_ptr().cast::<TOKEN_USER>().read() };
+    let sid = sid_to_string(token_user.User.Sid);
+    drop(buffer);
+    sid
+}
+
+fn aligned_token_buffer(required_bytes: u32) -> Vec<MaybeUninit<usize>> {
+    let words = (required_bytes as usize).div_ceil(size_of::<usize>());
+    vec![MaybeUninit::uninit(); words]
 }
 
 fn sid_to_string(sid: windows_sys::Win32::Security::PSID) -> io::Result<String> {
@@ -88,24 +101,68 @@ fn last_error(operation: &str) -> io::Error {
     io::Error::new(error.kind(), format!("{operation} failed: {error}"))
 }
 
-fn mutex_name(sid: &str, pipe_name: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(sid.as_bytes());
-    hasher.update([0]);
-    hasher.update(pipe_name.as_bytes());
-    format!("Local\\MissionControlSupervisor-{:x}", hasher.finalize())
+fn mutex_name(sid: &str) -> String {
+    format!(
+        "Global\\MissionControlSupervisor-{:x}",
+        Sha256::digest(sid.as_bytes())
+    )
+}
+
+struct MutexSecurity {
+    attributes: SECURITY_ATTRIBUTES,
+    descriptor: PSECURITY_DESCRIPTOR,
+}
+
+impl MutexSecurity {
+    fn for_user(sid: &str) -> io::Result<Self> {
+        let sddl = format!("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{sid})");
+        let wide_sddl: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
+        let mut descriptor = ptr::null_mut();
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide_sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(last_error(
+                "ConvertStringSecurityDescriptorToSecurityDescriptorW",
+            ));
+        }
+
+        Ok(Self {
+            attributes: SECURITY_ATTRIBUTES {
+                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: descriptor,
+                bInheritHandle: 0,
+            },
+            descriptor,
+        })
+    }
+}
+
+impl Drop for MutexSecurity {
+    fn drop(&mut self) {
+        unsafe {
+            LocalFree(self.descriptor);
+        }
+    }
 }
 
 impl SingleInstance {
-    pub fn acquire(pipe_name: &str, sid: &str) -> io::Result<AcquireResult> {
-        let name = mutex_name(sid, pipe_name);
+    pub fn acquire(sid: &str) -> io::Result<AcquireResult> {
+        let name = mutex_name(sid);
         let wide_name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
-        let handle = unsafe { CreateMutexW(ptr::null(), 1, wide_name.as_ptr()) };
+        let security = MutexSecurity::for_user(sid)?;
+        let handle = unsafe { CreateMutexW(&security.attributes, 1, wide_name.as_ptr()) };
+        let create_error = unsafe { GetLastError() };
         if handle.is_null() {
-            return Err(io::Error::last_os_error());
+            return Err(io::Error::from_raw_os_error(create_error as i32));
         }
 
-        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        if create_error == ERROR_ALREADY_EXISTS {
             unsafe { CloseHandle(handle) };
             return Ok(AcquireResult::AlreadyRunning);
         }
@@ -125,7 +182,19 @@ impl Drop for SingleInstance {
 
 #[cfg(test)]
 mod tests {
-    use super::production_pipe_name;
+    use std::mem::{align_of, size_of};
+
+    use windows_sys::Win32::Security::TOKEN_USER;
+
+    use super::{aligned_token_buffer, mutex_name, production_pipe_name};
+
+    #[test]
+    fn token_buffer_covers_requested_bytes_with_token_user_alignment() {
+        let buffer = aligned_token_buffer(17);
+
+        assert!(buffer.len() * size_of::<usize>() >= 17);
+        assert_eq!(buffer.as_ptr().align_offset(align_of::<TOKEN_USER>()), 0);
+    }
 
     #[test]
     fn production_pipe_name_is_a_stable_opaque_sid_digest() {
@@ -135,5 +204,17 @@ mod tests {
 
         assert_eq!(pipe_name, "mission-control-4c51f3baadf41ed2");
         assert!(!pipe_name.contains(sid));
+    }
+
+    #[test]
+    fn mutex_name_is_a_global_stable_opaque_user_identity() {
+        let sid = "S-1-5-21-111-222-333-1001";
+
+        let first = mutex_name(sid);
+        let second = mutex_name(sid);
+
+        assert_eq!(first, second);
+        assert!(first.starts_with("Global\\MissionControlSupervisor-"));
+        assert!(!first.contains(sid));
     }
 }

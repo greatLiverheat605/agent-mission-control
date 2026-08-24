@@ -1,11 +1,10 @@
 pub mod single_instance;
 
 use std::ffi::OsString;
-use std::fmt;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -15,20 +14,28 @@ use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, SetCon
 use single_instance::{AcquireResult, SingleInstance, current_user_sid, production_pipe_name};
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
+static READY_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 pub enum RunError {
     AlreadyRunning,
-    InvalidArguments(String),
+    InvalidArguments,
     Io(std::io::Error),
 }
 
-impl fmt::Display for RunError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl RunError {
+    pub const fn code(&self) -> &'static str {
         match self {
-            Self::AlreadyRunning => formatter.write_str("supervisor is already running"),
-            Self::InvalidArguments(message) => formatter.write_str(message),
-            Self::Io(error) => error.fmt(formatter),
+            Self::AlreadyRunning => "already_running",
+            Self::InvalidArguments => "invalid_arguments",
+            Self::Io(_) => "io_error",
+        }
+    }
+
+    pub const fn exit_code(&self) -> u8 {
+        match self {
+            Self::AlreadyRunning => 23,
+            Self::InvalidArguments | Self::Io(_) => 2,
         }
     }
 }
@@ -56,14 +63,11 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Config, RunErr
                     args.next()
                         .and_then(|value| value.into_string().ok())
                         .filter(|value| !value.is_empty())
-                        .ok_or_else(|| invalid("--pipe-name requires a non-empty value"))?,
+                        .ok_or_else(invalid)?,
                 );
             }
             Some("--data-dir") => {
-                data_dir = Some(PathBuf::from(
-                    args.next()
-                        .ok_or_else(|| invalid("--data-dir requires a value"))?,
-                ));
+                data_dir = Some(PathBuf::from(args.next().ok_or_else(invalid)?));
             }
             Some("--parent-pid") => {
                 let value = args
@@ -72,26 +76,31 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Config, RunErr
                     .and_then(|value| value.parse::<u32>().ok())
                     .filter(|value| *value != 0);
                 if value.is_none() {
-                    return Err(invalid("--parent-pid requires a nonzero u32"));
+                    return Err(invalid());
                 }
             }
             Some("--log-level") => {
-                args.next()
-                    .ok_or_else(|| invalid("--log-level requires a value"))?;
+                // Phase 1 validates the level but does not retain it until log filtering exists.
+                let value = args.next().and_then(|value| value.into_string().ok());
+                if !matches!(
+                    value.as_deref(),
+                    Some("trace" | "debug" | "info" | "warn" | "error")
+                ) {
+                    return Err(invalid());
+                }
             }
-            Some(argument) => return Err(invalid(&format!("unknown argument: {argument}"))),
-            None => return Err(invalid("arguments must be valid Unicode")),
+            Some(_) | None => return Err(invalid()),
         }
     }
 
     Ok(Config {
         pipe_name,
-        data_dir: data_dir.ok_or_else(|| invalid("--data-dir is required"))?,
+        data_dir: data_dir.ok_or_else(invalid)?,
     })
 }
 
-fn invalid(message: &str) -> RunError {
-    RunError::InvalidArguments(message.to_owned())
+fn invalid() -> RunError {
+    RunError::InvalidArguments
 }
 
 unsafe extern "system" fn console_handler(event: u32) -> i32 {
@@ -131,13 +140,50 @@ fn write_stopped_log(writer: &mut impl Write, pid: u32, pipe_name: &str) -> io::
     writeln!(writer)
 }
 
+fn resolve_pipe_name(pipe_name: Option<String>, sid: &str) -> String {
+    pipe_name.unwrap_or_else(|| production_pipe_name(sid))
+}
+
+fn remove_file_if_exists(path: &std::path::Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn write_ready_file(data_dir: &std::path::Path, pid: u32, pipe_name: &str) -> io::Result<()> {
+    let ready_path = data_dir.join("supervisor.ready");
+    remove_file_if_exists(&ready_path)?;
+
+    let temp_path = data_dir.join(format!(
+        "supervisor.ready.{pid}.{}.tmp",
+        READY_NONCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let ready =
+        serde_json::to_vec(&json!({ "pid": pid, "pipe": pipe_name })).map_err(io::Error::other)?;
+    let mut temp = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)?;
+    let publish = (|| {
+        temp.write_all(&ready)?;
+        temp.flush()?;
+        temp.sync_all()?;
+        drop(temp);
+        fs::rename(&temp_path, &ready_path)
+    })();
+    if publish.is_err() {
+        let _ = remove_file_if_exists(&temp_path);
+    }
+    publish
+}
+
 pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), RunError> {
     let config = parse_args(args)?;
     let sid = current_user_sid()?;
-    let pipe_name = config
-        .pipe_name
-        .unwrap_or_else(|| production_pipe_name(&sid));
-    let _instance = match SingleInstance::acquire(&pipe_name, &sid)? {
+    let pipe_name = resolve_pipe_name(config.pipe_name, &sid);
+    let _instance = match SingleInstance::acquire(&sid)? {
         AcquireResult::Acquired(instance) => instance,
         AcquireResult::AlreadyRunning => return Err(RunError::AlreadyRunning),
     };
@@ -146,11 +192,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), RunError> {
     fs::create_dir_all(&config.data_dir)?;
     let pid = std::process::id();
     let ready_path = config.data_dir.join("supervisor.ready");
-    let ready = json!({ "pid": pid, "pipe": pipe_name });
-    fs::write(
-        &ready_path,
-        serde_json::to_vec(&ready).expect("serializing fixed ready fields cannot fail"),
-    )?;
+    write_ready_file(&config.data_dir, pid, &pipe_name)?;
     let mut stdout = io::stdout().lock();
     serde_json::to_writer(
         &mut stdout,
@@ -164,7 +206,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), RunError> {
     }
 
     let stopped_result = write_stopped_log(&mut stdout, pid, &pipe_name);
-    let cleanup_result = fs::remove_file(ready_path);
+    let cleanup_result = remove_file_if_exists(&ready_path);
     stopped_result?;
     cleanup_result?;
     Ok(())
@@ -172,7 +214,51 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), RunError> {
 
 #[cfg(test)]
 mod tests {
-    use super::write_stopped_log;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::{remove_file_if_exists, resolve_pipe_name, write_ready_file, write_stopped_log};
+
+    static TEST_NONCE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn stale_ready_is_replaced_without_leaving_a_temp_file() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "mission-supervisor-ready-unit-{}-{}",
+            std::process::id(),
+            TEST_NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&data_dir).expect("create test data dir");
+        fs::write(data_dir.join("supervisor.ready"), b"{malformed").expect("seed malformed ready");
+
+        write_ready_file(&data_dir, 42, "test-pipe").expect("replace stale ready");
+
+        let ready: serde_json::Value = serde_json::from_slice(
+            &fs::read(data_dir.join("supervisor.ready")).expect("read ready"),
+        )
+        .expect("ready is valid JSON");
+        assert_eq!(ready, serde_json::json!({ "pid": 42, "pipe": "test-pipe" }));
+        let entries: Vec<_> = fs::read_dir(&data_dir)
+            .expect("read test data dir")
+            .map(|entry| entry.expect("read entry").file_name())
+            .collect();
+        assert_eq!(entries, ["supervisor.ready"]);
+
+        fs::remove_file(data_dir.join("supervisor.ready")).expect("remove ready");
+        remove_file_if_exists(&data_dir.join("supervisor.ready"))
+            .expect("missing ready cleanup succeeds");
+
+        fs::remove_dir_all(data_dir).expect("remove test data dir");
+    }
+
+    #[test]
+    fn omitted_pipe_name_resolves_to_the_users_production_digest() {
+        let sid = "S-1-5-21-111-222-333-1001";
+
+        let pipe_name = resolve_pipe_name(None, sid);
+
+        assert_eq!(pipe_name, "mission-control-4c51f3baadf41ed2");
+    }
 
     #[test]
     fn shutdown_helper_writes_structured_stopped_log() {

@@ -1,35 +1,62 @@
 #![cfg(windows)]
 
 use std::fs;
+use std::io::Read;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
+
 struct TestProcess(Child);
+
+static TEST_NONCE: AtomicU64 = AtomicU64::new(0);
 
 impl TestProcess {
     fn spawn(pipe_name: &str, data_dir: &Path) -> Self {
-        Self::spawn_args([
-            "--pipe-name",
-            pipe_name,
-            "--data-dir",
-            data_dir.to_str().expect("test data dir is valid Unicode"),
-            "--parent-pid",
-            &std::process::id().to_string(),
-            "--log-level",
-            "debug",
-        ])
+        Self::spawn_with_flags(pipe_name, data_dir, 0)
     }
 
-    fn spawn_args<const N: usize>(args: [&str; N]) -> Self {
-        let child = Command::new(env!("CARGO_BIN_EXE_mission-control-supervisor"))
+    fn spawn_process_group(pipe_name: &str, data_dir: &Path) -> Self {
+        Self::spawn_with_flags(pipe_name, data_dir, CREATE_NEW_PROCESS_GROUP)
+    }
+
+    fn spawn_with_flags(pipe_name: &str, data_dir: &Path, creation_flags: u32) -> Self {
+        Self::spawn_args_with_flags(
+            [
+                "--pipe-name",
+                pipe_name,
+                "--data-dir",
+                data_dir.to_str().expect("test data dir is valid Unicode"),
+                "--parent-pid",
+                &std::process::id().to_string(),
+                "--log-level",
+                "debug",
+            ],
+            creation_flags,
+        )
+    }
+
+    fn spawn_args(args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>) -> Self {
+        Self::spawn_args_with_flags(args, 0)
+    }
+
+    fn spawn_args_with_flags(
+        args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+        creation_flags: u32,
+    ) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_mission-control-supervisor"));
+        command
             .args(args)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("supervisor starts");
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .creation_flags(creation_flags);
+        let child = command.spawn().expect("supervisor starts");
 
         Self(child)
     }
@@ -57,6 +84,38 @@ impl TestProcess {
         }
         self.0.wait().expect("reap child process");
     }
+
+    fn read_stderr(&mut self) -> String {
+        let mut stderr = String::new();
+        self.0
+            .stderr
+            .take()
+            .expect("child stderr is captured")
+            .read_to_string(&mut stderr)
+            .expect("read child stderr");
+        stderr
+    }
+
+    fn read_stdout(&mut self) -> String {
+        let mut stdout = String::new();
+        self.0
+            .stdout
+            .take()
+            .expect("child stdout is captured")
+            .read_to_string(&mut stdout)
+            .expect("read child stdout");
+        stdout
+    }
+
+    fn send_ctrl_break(&self) {
+        if unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, self.id()) } == 0 {
+            panic!(
+                "GenerateConsoleCtrlEvent failed for process group {}: {}",
+                self.id(),
+                std::io::Error::last_os_error()
+            );
+        }
+    }
 }
 
 impl Drop for TestProcess {
@@ -74,8 +133,9 @@ fn unique_test_dir() -> PathBuf {
         .expect("system clock is after the Unix epoch")
         .as_nanos();
     std::env::temp_dir().join(format!(
-        "mission-supervisor-single-instance-{}-{nonce}",
-        std::process::id()
+        "mission-supervisor-single-instance-{}-{nonce}-{}",
+        std::process::id(),
+        TEST_NONCE.fetch_add(1, Ordering::Relaxed)
     ))
 }
 
@@ -92,24 +152,6 @@ fn wait_for_ready(path: &Path, expected_pid: u32, expected_pipe: &str) {
         assert!(
             Instant::now() < deadline,
             "supervisor did not write the expected ready file"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn wait_for_default_ready(path: &Path, expected_pid: u32) -> String {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Ok(contents) = fs::read_to_string(path)
-            && let Ok(ready) = serde_json::from_str::<serde_json::Value>(&contents)
-            && ready["pid"] == expected_pid
-            && let Some(pipe_name) = ready["pipe"].as_str()
-        {
-            return pipe_name.to_owned();
-        }
-        assert!(
-            Instant::now() < deadline,
-            "supervisor did not write a default ready file"
         );
         thread::sleep(Duration::from_millis(10));
     }
@@ -132,66 +174,70 @@ fn a_named_instance_excludes_competitors_and_releases_after_exit() {
     let mut first = TestProcess::spawn(&pipe_name, &data_dir);
     wait_for_ready(&ready_path, first.id(), &pipe_name);
 
-    let mut second = TestProcess::spawn(&pipe_name, &data_dir);
+    let competing_pipe_name = format!("{pipe_name}-competitor");
+    let mut second = TestProcess::spawn(&competing_pipe_name, &data_dir);
     let second_status = second
         .wait_for_exit(Duration::from_secs(2))
         .expect("competing supervisor exits within two seconds");
     assert_eq!(second_status.code(), Some(23));
 
     first.terminate();
-    fs::remove_file(&ready_path).expect("remove stale ready file from terminated process");
-    assert!(
-        !ready_path.exists(),
-        "old ready file is gone before restart"
-    );
+    fs::write(&ready_path, b"{malformed").expect("seed malformed stale ready after crash");
 
-    let mut third = TestProcess::spawn(&pipe_name, &data_dir);
+    let mut third = TestProcess::spawn_process_group(&pipe_name, &data_dir);
     wait_for_ready(&ready_path, third.id(), &pipe_name);
-    third.terminate();
-
-    fs::remove_dir_all(&data_dir).expect("remove isolated test data dir");
-}
-
-#[test]
-fn omitted_pipe_name_uses_the_current_users_stable_digest() {
-    let data_dir = unique_test_dir();
-    fs::create_dir_all(&data_dir).expect("create isolated test data dir");
-
-    let mut process = TestProcess::spawn_args([
-        "--data-dir",
-        data_dir.to_str().expect("test data dir is valid Unicode"),
-    ]);
-    let pipe_name = wait_for_default_ready(&data_dir.join("supervisor.ready"), process.id());
-
-    assert!(pipe_name.starts_with("mission-control-"));
-    assert_eq!(pipe_name.len(), "mission-control-".len() + 16);
-
-    process.terminate();
-    fs::remove_dir_all(&data_dir).expect("remove isolated test data dir");
-}
-
-#[test]
-fn invalid_parent_pid_exits_nonzero() {
-    let data_dir = unique_test_dir();
-    let mut process = TestProcess::spawn_args([
-        "--pipe-name",
-        "mission-control-invalid-parent-test",
-        "--data-dir",
-        data_dir.to_str().expect("test data dir is valid Unicode"),
-        "--parent-pid",
-        "not-a-pid",
-    ]);
-
-    let status = process.wait_for_exit(Duration::from_secs(2));
-    if status.is_none() {
-        process.terminate();
-    }
     assert!(
-        status.is_some_and(|status| !status.success()),
-        "invalid parent PID must exit nonzero"
+        fs::read_dir(&data_dir)
+            .expect("read test data dir")
+            .all(|entry| !entry
+                .expect("read test data entry")
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")),
+        "ready publish leaves no temp files"
     );
+    third.send_ctrl_break();
+    let third_status = third
+        .wait_for_exit(Duration::from_secs(2))
+        .expect("graceful supervisor exits within two seconds");
+    assert_eq!(third_status.code(), Some(0));
+    let events: Vec<serde_json::Value> = third
+        .read_stdout()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("stdout line is valid JSON"))
+        .collect();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["event"], "supervisor.ready");
+    assert_eq!(events[1]["event"], "supervisor.stopped");
+    assert!(!ready_path.exists(), "graceful shutdown removes ready file");
 
-    if data_dir.exists() {
-        fs::remove_dir_all(&data_dir).expect("remove isolated test data dir");
+    fs::remove_dir_all(&data_dir).expect("remove isolated test data dir");
+}
+
+#[test]
+fn invalid_arguments_emit_one_safe_structured_error() {
+    for invalid_args in [
+        vec!["--parent-pid", "sensitive-parent-value"],
+        vec!["--sensitive-unknown-argument"],
+        vec!["--log-level", "sensitive-log-level"],
+    ] {
+        let mut process = TestProcess::spawn_args(invalid_args);
+        let status = process
+            .wait_for_exit(Duration::from_secs(2))
+            .expect("invalid arguments exit within two seconds");
+        assert_eq!(status.code(), Some(2));
+
+        let stderr = process.read_stderr();
+        assert_eq!(stderr.lines().count(), 1);
+        let error: serde_json::Value =
+            serde_json::from_str(stderr.trim()).expect("stderr is valid JSON");
+        assert_eq!(
+            error,
+            serde_json::json!({
+                "event": "supervisor.error",
+                "errorCode": "invalid_arguments"
+            })
+        );
+        assert!(!stderr.contains("sensitive"));
     }
 }

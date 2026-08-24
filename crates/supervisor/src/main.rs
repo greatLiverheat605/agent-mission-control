@@ -1,14 +1,16 @@
 use std::process::ExitCode;
 
-use mission_supervisor::RunError;
+use serde_json::json;
 
 fn main() -> ExitCode {
     match mission_supervisor::run(std::env::args_os().skip(1)) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(RunError::AlreadyRunning) => ExitCode::from(23),
         Err(error) => {
-            eprintln!("{error}");
-            ExitCode::from(2)
+            eprintln!(
+                "{}",
+                json!({ "event": "supervisor.error", "errorCode": error.code() })
+            );
+            ExitCode::from(error.exit_code())
         }
     }
 }
