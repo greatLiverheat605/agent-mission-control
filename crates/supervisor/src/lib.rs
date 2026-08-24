@@ -1,4 +1,6 @@
 #[cfg(windows)]
+pub mod event_pipeline;
+#[cfg(windows)]
 pub mod ipc;
 #[cfg(windows)]
 pub mod package_smoke;
