@@ -4,28 +4,20 @@ param(
 
     [string] $PipeName = "mission-package-smoke-$([guid]::NewGuid().ToString('N'))",
 
-    [string] $CredentialTarget = 'Agent Mission Control/Install Secret/v1',
+    [string] $TimeoutSeconds = '15',
 
-    [ValidateRange(1, 300)]
-    [int] $TimeoutSeconds = 15,
-
-    [ValidateRange(1, 600)]
-    [int] $InstallTimeoutSeconds = 120
+    [string] $InstallTimeoutSeconds = '120'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$productionCredentialTarget = 'Agent Mission Control/Install Secret/v1'
-$productInstallId = 'mission-control-desktop-v1'
 $protocolVersion = 1
 $workRoot = Join-Path ([IO.Path]::GetTempPath()) "mission-package-smoke-$([guid]::NewGuid().ToString('N'))"
 $installRoot = Join-Path $workRoot 'installed'
 $dataRoot = Join-Path $workRoot 'data'
 $supervisorProcess = $null
 $installerProcess = $null
-$credentialStateKnown = $false
-$credentialExisted = $false
 $failure = $null
 $result = $null
 
@@ -49,6 +41,51 @@ function Get-FailureCode {
     $code = $ErrorRecord.Exception.Data['PackageSmokeCode']
     if ($code) { return [string] $code }
     'PACKAGE_SMOKE_UNEXPECTED'
+}
+
+function Resolve-BoundedInteger {
+    param(
+        [Parameter(Mandatory)][string] $Value,
+        [Parameter(Mandatory)][int] $Minimum,
+        [Parameter(Mandatory)][int] $Maximum
+    )
+
+    $parsed = 0
+    if (-not [int]::TryParse(
+            $Value,
+            [Globalization.NumberStyles]::Integer,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [ref] $parsed
+        ) -or $parsed -lt $Minimum -or $parsed -gt $Maximum) {
+        Throw-PackageSmokeFailure -Code 'PACKAGE_ARGUMENT_INVALID' -Message 'A package smoke timeout argument is invalid.'
+    }
+    $parsed
+}
+
+function Stop-OwnedProcess {
+    param(
+        [Parameter(Mandatory)] $Process,
+        [Parameter(Mandatory)][string] $Description,
+        [int] $TimeoutMilliseconds = 5000
+    )
+
+    if (-not $Process.HasExited) {
+        $Process.Kill()
+        if (-not $Process.WaitForExit($TimeoutMilliseconds)) {
+            throw "$Description did not exit during cleanup."
+        }
+    }
+}
+
+function Throw-PackageCleanupFailure {
+    param(
+        [Parameter(Mandatory)][string] $OriginalCode,
+        [Parameter(Mandatory)][string[]] $FailedActions
+    )
+
+    $names = @($FailedActions | ForEach-Object { ([string] $_).Split(':')[0] })
+    Throw-PackageSmokeFailure -Code 'PACKAGE_CLEANUP_FAILED' `
+        -Message "Package cleanup failed for: $($names -join ', '); original=$OriginalCode."
 }
 
 function Resolve-BundlePath {
@@ -82,6 +119,7 @@ function Copy-ExtractedArtifact {
         [string] $Destination
     )
 
+    [void] @(Get-PackageTreeEntries -Root $Source)
     foreach ($entry in Get-ChildItem -LiteralPath $Source -Force) {
         Copy-Item -LiteralPath $entry.FullName -Destination $Destination -Recurse -Force
     }
@@ -117,8 +155,9 @@ function Expand-MsiArtifact {
         Throw-PackageSmokeFailure -Code 'PACKAGE_INSTALL_FAILED' -Message 'The MSI administrative install did not start.'
     }
     if (-not $script:installerProcess.WaitForExit($Timeout * 1000)) {
-        Stop-Process -Id $script:installerProcess.Id -Force -ErrorAction SilentlyContinue
-        [void] $script:installerProcess.WaitForExit(5000)
+        try {
+            Stop-OwnedProcess -Process $script:installerProcess -Description 'The MSI installer'
+        } catch {}
         Throw-PackageSmokeFailure -Code 'PACKAGE_INSTALL_TIMEOUT' -Message 'The MSI administrative install timed out.'
     }
     if ($script:installerProcess.ExitCode -ne 0) {
@@ -148,27 +187,60 @@ function Test-FileContainsFixtureSecret {
     $false
 }
 
+function Get-PackageTreeEntries {
+    param([Parameter(Mandatory)][string] $Root)
+
+    $rootItem = Get-Item -LiteralPath $Root -Force
+    if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        Throw-PackageSmokeFailure -Code 'PACKAGE_REPARSE_POINT' -Message 'The package contains a reparse point.'
+    }
+    $pending = New-Object 'Collections.Generic.Queue[IO.DirectoryInfo]'
+    $pending.Enqueue([IO.DirectoryInfo] $rootItem)
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Dequeue()
+        foreach ($entry in $directory.EnumerateFileSystemInfos()) {
+            if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                Throw-PackageSmokeFailure -Code 'PACKAGE_REPARSE_POINT' -Message 'The package contains a reparse point.'
+            }
+            $entry
+            if (($entry.Attributes -band [IO.FileAttributes]::Directory) -ne 0) {
+                $pending.Enqueue([IO.DirectoryInfo] $entry)
+            }
+        }
+    }
+}
+
 function Assert-PackageContents {
     param([Parameter(Mandatory)][string] $Root)
 
-    $mcp = Get-ChildItem -LiteralPath $Root -Directory -Recurse -Force | Where-Object Name -IEQ 'MCP' | Select-Object -First 1
+    $entries = @(Get-PackageTreeEntries -Root $Root)
+    $mcp = $entries | Where-Object {
+        ($_.Attributes -band [IO.FileAttributes]::Directory) -ne 0 -and $_.Name -ieq 'MCP'
+    } | Select-Object -First 1
     if ($mcp) {
         Throw-PackageSmokeFailure -Code 'PACKAGE_FORBIDDEN_MCP' -Message 'The package contains a forbidden MCP directory.'
     }
 
-    $environmentFile = Get-ChildItem -LiteralPath $Root -File -Recurse -Force |
-        Where-Object Name -Match '^\.env(?:\.|$)' | Select-Object -First 1
+    $files = @($entries | Where-Object {
+            ($_.Attributes -band [IO.FileAttributes]::Directory) -eq 0
+        })
+    $environmentFile = $files | Where-Object Name -Match '^\.env(?:\.|$)' | Select-Object -First 1
     if ($environmentFile) {
         Throw-PackageSmokeFailure -Code 'PACKAGE_FORBIDDEN_ENV' -Message 'The package contains a forbidden environment file.'
     }
 
-    $secretPath = Get-ChildItem -LiteralPath $Root -Recurse -Force |
+    $secretPath = $entries |
         Where-Object Name -Match '(?i)fixture[-_. ]?secret|secret[-_. ]?fixture' | Select-Object -First 1
     if ($secretPath) {
         Throw-PackageSmokeFailure -Code 'PACKAGE_FORBIDDEN_SECRET' -Message 'The package contains fixture secret material.'
     }
 
-    foreach ($file in Get-ChildItem -LiteralPath $Root -File -Recurse -Force) {
+    $smokeClient = $files | Where-Object Name -IEQ 'mission-control-package-smoke.exe' | Select-Object -First 1
+    if ($smokeClient) {
+        Throw-PackageSmokeFailure -Code 'PACKAGE_FORBIDDEN_HELPER' -Message 'The package contains a build-only smoke client.'
+    }
+
+    foreach ($file in $files) {
         if (Test-FileContainsFixtureSecret -Path $file.FullName) {
             Throw-PackageSmokeFailure -Code 'PACKAGE_FORBIDDEN_SECRET' -Message 'The package contains fixture secret material.'
         }
@@ -187,7 +259,9 @@ function Get-SingleBinary {
         [string] $MissingCode
     )
 
-    $matches = @(Get-ChildItem -LiteralPath $Root -File -Recurse -Force -Filter $Name)
+    $matches = @(Get-PackageTreeEntries -Root $Root | Where-Object {
+            ($_.Attributes -band [IO.FileAttributes]::Directory) -eq 0 -and $_.Name -ieq $Name
+        })
     if ($matches.Count -eq 0) {
         Throw-PackageSmokeFailure -Code $MissingCode -Message "The package does not contain $Name."
     }
@@ -197,324 +271,113 @@ function Get-SingleBinary {
     $matches[0].FullName
 }
 
-function Add-CredentialInterop {
-    if ('PackageSmokeCredential' -as [type]) { return }
+function New-BinarySnapshot {
+    param([Parameter(Mandatory)][string] $Path)
 
-    Add-Type -TypeDefinition @'
-using System;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-
-[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-internal struct PackageSmokeNativeCredential
-{
-    public UInt32 Flags;
-    public UInt32 Type;
-    public IntPtr TargetName;
-    public IntPtr Comment;
-    public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
-    public UInt32 CredentialBlobSize;
-    public IntPtr CredentialBlob;
-    public UInt32 Persist;
-    public UInt32 AttributeCount;
-    public IntPtr Attributes;
-    public IntPtr TargetAlias;
-    public IntPtr UserName;
-}
-
-public static class PackageSmokeCredential
-{
-    private const UInt32 Generic = 1;
-    private const Int32 NotFound = 1168;
-
-    [DllImport("advapi32.dll", EntryPoint = "CredReadW", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern bool CredRead(string target, UInt32 type, UInt32 flags, out IntPtr credential);
-
-    [DllImport("advapi32.dll", EntryPoint = "CredDeleteW", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern bool CredDelete(string target, UInt32 type, UInt32 flags);
-
-    [DllImport("advapi32.dll", EntryPoint = "CredFree")]
-    private static extern void CredFree(IntPtr credential);
-
-    public static byte[] Read(string target)
-    {
-        IntPtr raw;
-        if (!CredRead(target, Generic, 0, out raw))
-        {
-            int error = Marshal.GetLastWin32Error();
-            if (error == NotFound) return null;
-            throw new Win32Exception(error, "CredReadW failed");
-        }
-
-        try
-        {
-            var credential = (PackageSmokeNativeCredential)Marshal.PtrToStructure(
-                raw, typeof(PackageSmokeNativeCredential));
-            var secret = new byte[credential.CredentialBlobSize];
-            if (secret.Length != 0) Marshal.Copy(credential.CredentialBlob, secret, 0, secret.Length);
-            return secret;
-        }
-        finally
-        {
-            CredFree(raw);
-        }
+    $file = Get-Item -LiteralPath $Path -Force
+    if ($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        Throw-PackageSmokeFailure -Code 'PACKAGE_BINARY_CHANGED' -Message 'A package binary changed after scanning.'
     }
-
-    public static void DeleteIfPresent(string target)
-    {
-        if (CredDelete(target, Generic, 0)) return;
-        int error = Marshal.GetLastWin32Error();
-        if (error != NotFound) throw new Win32Exception(error, "CredDeleteW failed");
+    [pscustomobject]@{
+        Path = [IO.Path]::GetFullPath($file.FullName)
+        Length = [int64] $file.Length
+        LastWriteTicks = [int64] $file.LastWriteTimeUtc.Ticks
+        CreationTicks = [int64] $file.CreationTimeUtc.Ticks
     }
 }
-'@
-}
 
-function Write-UInt32LittleEndian {
-    param(
-        [Parameter(Mandatory)]
-        [IO.Stream] $Stream,
+function Assert-BinarySnapshot {
+    param([Parameter(Mandatory)] $Snapshot)
 
-        [Parameter(Mandatory)]
-        [uint32] $Value
-    )
-
-    $bytes = [BitConverter]::GetBytes($Value)
-    if (-not [BitConverter]::IsLittleEndian) { [Array]::Reverse($bytes) }
-    $Stream.Write($bytes, 0, $bytes.Length)
-}
-
-function Wait-StreamTaskWithDeadline {
-    param(
-        [Parameter(Mandatory)]
-        [Threading.Tasks.Task] $Task,
-
-        [Parameter(Mandatory)]
-        [IO.Stream] $Stream,
-
-        [Parameter(Mandatory)]
-        [Threading.CancellationTokenSource] $CancellationSource,
-
-        [Parameter(Mandatory)]
-        [Diagnostics.Stopwatch] $Stopwatch,
-
-        [Parameter(Mandatory)]
-        [int] $TimeoutMilliseconds,
-
-        [Parameter(Mandatory)]
-        [string] $Operation
-    )
-
-    $remaining = $TimeoutMilliseconds - [int] $Stopwatch.ElapsedMilliseconds
-    $completed = $false
-    if ($remaining -gt 0) {
-        try {
-            $completed = $Task.Wait($remaining)
-        } catch [AggregateException] {
-            $completed = $true
-        }
-    }
-    if ($completed) {
-        [void] $Task.GetAwaiter().GetResult()
-        return
-    }
-
-    $CancellationSource.Cancel()
-    $Stream.Dispose()
-    $settled = $false
     try {
-        $settled = $Task.Wait(5000)
-    } catch [AggregateException] {
-        $settled = $true
+        $current = New-BinarySnapshot -Path $Snapshot.Path
+    } catch {
+        Throw-PackageSmokeFailure -Code 'PACKAGE_BINARY_CHANGED' -Message 'A package binary changed after scanning.'
     }
-    if (-not $settled -or -not $Task.IsCompleted) {
-        throw [TimeoutException]::new("Pipe $Operation did not stop after timing out.")
+    if ($current.Path -cne $Snapshot.Path -or
+        $current.Length -ne $Snapshot.Length -or
+        $current.LastWriteTicks -ne $Snapshot.LastWriteTicks -or
+        $current.CreationTicks -ne $Snapshot.CreationTicks) {
+        Throw-PackageSmokeFailure -Code 'PACKAGE_BINARY_CHANGED' -Message 'A package binary changed after scanning.'
     }
-    throw [TimeoutException]::new("Pipe $Operation timed out.")
 }
 
-function New-HandshakeProof {
+function Convert-PackageSmokeClientResult {
     param(
-        [Parameter(Mandatory)]
-        [byte[]] $Secret,
-
-        [Parameter(Mandatory)]
-        [byte[]] $Nonce
+        [Parameter(Mandatory)][int] $ExitCode,
+        [AllowEmptyString()][string] $StdOut,
+        [AllowEmptyString()][string] $StdErr
     )
 
-    $utf8 = New-Object Text.UTF8Encoding -ArgumentList $false
-    $installId = $utf8.GetBytes($productInstallId)
-    $input = New-Object IO.MemoryStream
-    $hmac = $null
+    if ($StdErr -ne '') {
+        Throw-PackageSmokeFailure -Code 'PACKAGE_HANDSHAKE_FAILED' -Message 'The Rust smoke client emitted unexpected stderr.'
+    }
+    $line = [string] $StdOut
+    if ($line.EndsWith("`r`n")) {
+        $line = $line.Substring(0, $line.Length - 2)
+    } elseif ($line.EndsWith("`n")) {
+        $line = $line.Substring(0, $line.Length - 1)
+    }
+    if ($line -notmatch '^\{.+\}$' -or $line -match "`r|`n") {
+        Throw-PackageSmokeFailure -Code 'PACKAGE_HANDSHAKE_FAILED' -Message 'The Rust smoke client returned an invalid output contract.'
+    }
     try {
-        $tag = $utf8.GetBytes("mission-control-handshake-v1`0")
-        $input.Write($tag, 0, $tag.Length)
-        Write-UInt32LittleEndian -Stream $input -Value $installId.Length
-        $input.Write($installId, 0, $installId.Length)
-        Write-UInt32LittleEndian -Stream $input -Value $Nonce.Length
-        $input.Write($Nonce, 0, $Nonce.Length)
-        Write-UInt32LittleEndian -Stream $input -Value 1
-        Write-UInt32LittleEndian -Stream $input -Value $protocolVersion
+        $contract = $line | ConvertFrom-Json
+    } catch {
+        Throw-PackageSmokeFailure -Code 'PACKAGE_HANDSHAKE_FAILED' -Message 'The Rust smoke client returned invalid JSON.'
+    }
+    if ($ExitCode -ne 0 -or $contract.ok -ne $true -or
+        $contract.protocolVersion -ne $protocolVersion -or
+        [string]::IsNullOrWhiteSpace([string] $contract.supervisorVersion)) {
+        Throw-PackageSmokeFailure -Code 'PACKAGE_HANDSHAKE_FAILED' -Message 'The bundled Supervisor failed the authenticated protocol v1 Ping/Pong.'
+    }
+    $contract
+}
 
-        $hmac = New-Object Security.Cryptography.HMACSHA256
-        $hmac.Key = $Secret
-        $hmac.ComputeHash($input.ToArray())
+function Invoke-PackageSmokeClient {
+    param(
+        [Parameter(Mandatory)][string] $Name,
+        [Parameter(Mandatory)][int] $TimeoutMilliseconds
+    )
+
+    $repositoryRoot = Split-Path -Parent $PSScriptRoot
+    $clientPath = Join-Path $repositoryRoot 'target\release\mission-control-package-smoke.exe'
+    if (-not (Test-Path -LiteralPath $clientPath -PathType Leaf)) {
+        Throw-PackageSmokeFailure -Code 'PACKAGE_SMOKE_CLIENT_MISSING' -Message 'The Rust package smoke client has not been built.'
+    }
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $clientPath
+    $startInfo.Arguments = "--pipe-name `"$Name`" --timeout-milliseconds $TimeoutMilliseconds"
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    $stdoutTask = $null
+    $stderrTask = $null
+    try {
+        if (-not $process.Start()) {
+            Throw-PackageSmokeFailure -Code 'PACKAGE_HANDSHAKE_FAILED' -Message 'The Rust package smoke client did not start.'
+        }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutMilliseconds + 5000)) {
+            Stop-OwnedProcess -Process $process -Description 'The Rust package smoke client'
+            Throw-PackageSmokeFailure -Code 'PACKAGE_HANDSHAKE_FAILED' -Message 'The Rust package smoke client exceeded its deadline.'
+        }
+        $drain = [Threading.Tasks.Task]::WhenAll([Threading.Tasks.Task[]] @($stdoutTask, $stderrTask))
+        if (-not $drain.Wait(5000)) {
+            Throw-PackageSmokeFailure -Code 'PACKAGE_HANDSHAKE_FAILED' -Message 'The Rust package smoke client output did not drain.'
+        }
+        Convert-PackageSmokeClientResult -ExitCode $process.ExitCode `
+            -StdOut $stdoutTask.GetAwaiter().GetResult() -StdErr $stderrTask.GetAwaiter().GetResult()
     } finally {
-        if ($hmac) { $hmac.Dispose() }
-        $input.Dispose()
-    }
-}
-
-function Write-Frame {
-    param(
-        [Parameter(Mandatory)]
-        [IO.Stream] $Stream,
-
-        [Parameter(Mandatory)]
-        $Message,
-
-        [Parameter(Mandatory)]
-        [int] $TimeoutMilliseconds
-    )
-
-    $utf8 = New-Object Text.UTF8Encoding -ArgumentList $false
-    $payload = $utf8.GetBytes(($Message | ConvertTo-Json -Depth 8 -Compress))
-    $length = [BitConverter]::GetBytes([uint32] $payload.Length)
-    if (-not [BitConverter]::IsLittleEndian) { [Array]::Reverse($length) }
-    $frame = New-Object byte[] ($length.Length + $payload.Length)
-    [Array]::Copy($length, 0, $frame, 0, $length.Length)
-    [Array]::Copy($payload, 0, $frame, $length.Length, $payload.Length)
-
-    $cancellation = New-Object Threading.CancellationTokenSource
-    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
-    try {
-        $write = $Stream.WriteAsync($frame, 0, $frame.Length, $cancellation.Token)
-        Wait-StreamTaskWithDeadline -Task $write -Stream $Stream -CancellationSource $cancellation `
-            -Stopwatch $stopwatch -TimeoutMilliseconds $TimeoutMilliseconds -Operation 'write'
-        $flush = $Stream.FlushAsync($cancellation.Token)
-        Wait-StreamTaskWithDeadline -Task $flush -Stream $Stream -CancellationSource $cancellation `
-            -Stopwatch $stopwatch -TimeoutMilliseconds $TimeoutMilliseconds -Operation 'flush'
-    } finally {
-        $stopwatch.Stop()
-        $cancellation.Dispose()
-    }
-}
-
-function Read-Exact {
-    param(
-        [Parameter(Mandatory)]
-        [IO.Stream] $Stream,
-
-        [Parameter(Mandatory)]
-        [int] $Length,
-
-        [Parameter(Mandatory)]
-        [int] $TimeoutMilliseconds
-    )
-
-    $buffer = New-Object byte[] $Length
-    $offset = 0
-    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
-    while ($offset -lt $Length) {
-        $remaining = $TimeoutMilliseconds - [int] $stopwatch.ElapsedMilliseconds
-        if ($remaining -le 0) { throw [TimeoutException]::new('Pipe read timed out.') }
-        $pending = $Stream.BeginRead($buffer, $offset, $Length - $offset, $null, $null)
-        try {
-            if (-not $pending.AsyncWaitHandle.WaitOne($remaining)) {
-                $Stream.Dispose()
-                throw [TimeoutException]::new('Pipe read timed out.')
-            }
-            $read = $Stream.EndRead($pending)
-        } finally {
-            $pending.AsyncWaitHandle.Dispose()
+        if (-not $process.HasExited) {
+            try { Stop-OwnedProcess -Process $process -Description 'The Rust package smoke client' } catch {}
         }
-        if ($read -eq 0) { throw [IO.EndOfStreamException]::new('Pipe closed before the frame completed.') }
-        $offset += $read
-    }
-    $buffer
-}
-
-function Read-Frame {
-    param(
-        [Parameter(Mandatory)]
-        [IO.Stream] $Stream,
-
-        [Parameter(Mandatory)]
-        [int] $TimeoutMilliseconds
-    )
-
-    $lengthBytes = Read-Exact -Stream $Stream -Length 4 -TimeoutMilliseconds $TimeoutMilliseconds
-    if (-not [BitConverter]::IsLittleEndian) { [Array]::Reverse($lengthBytes) }
-    $length = [BitConverter]::ToUInt32($lengthBytes, 0)
-    if ($length -gt 1048576) { throw [IO.InvalidDataException]::new('Frame exceeds the protocol limit.') }
-    $payload = Read-Exact -Stream $Stream -Length $length -TimeoutMilliseconds $TimeoutMilliseconds
-    ([Text.Encoding]::UTF8.GetString($payload) | ConvertFrom-Json)
-}
-
-function Wait-CredentialSecret {
-    param(
-        [Parameter(Mandatory)]
-        [string] $Target,
-
-        [Parameter(Mandatory)]
-        [DateTime] $Deadline
-    )
-
-    do {
-        $secret = [PackageSmokeCredential]::Read($Target)
-        if ($null -ne $secret) { return $secret }
-        Start-Sleep -Milliseconds 50
-    } while ([DateTime]::UtcNow -lt $Deadline)
-    throw [TimeoutException]::new('The install credential was not created before the deadline.')
-}
-
-function Invoke-ProtocolHandshake {
-    param(
-        [Parameter(Mandatory)]
-        [string] $Name,
-
-        [Parameter(Mandatory)]
-        [byte[]] $Secret,
-
-        [Parameter(Mandatory)]
-        [int] $TimeoutMilliseconds
-    )
-
-    $nonce = New-Object byte[] 32
-    $random = [Security.Cryptography.RandomNumberGenerator]::Create()
-    $pipe = $null
-    try {
-        $random.GetBytes($nonce)
-        $proof = New-HandshakeProof -Secret $Secret -Nonce $nonce
-        $pipe = New-Object IO.Pipes.NamedPipeClientStream -ArgumentList '.', $Name,
-            ([IO.Pipes.PipeDirection]::InOut), ([IO.Pipes.PipeOptions]::Asynchronous)
-        $pipe.Connect($TimeoutMilliseconds)
-
-        Write-Frame -Stream $pipe -TimeoutMilliseconds $TimeoutMilliseconds -Message ([ordered]@{
-                type = 'Handshake'
-                payload = [ordered]@{
-                    install_id = $productInstallId
-                    protocol_versions = @($protocolVersion)
-                    nonce = @($nonce)
-                    proof = @($proof)
-                }
-            })
-        $accepted = Read-Frame -Stream $pipe -TimeoutMilliseconds $TimeoutMilliseconds
-        if ($accepted.type -ne 'HandshakeAccepted' -or $accepted.payload.protocol_version -ne $protocolVersion) {
-            throw [IO.InvalidDataException]::new('The sidecar rejected protocol v1 authentication.')
-        }
-
-        Write-Frame -Stream $pipe -TimeoutMilliseconds $TimeoutMilliseconds -Message ([ordered]@{ type = 'Ping' })
-        $pong = Read-Frame -Stream $pipe -TimeoutMilliseconds $TimeoutMilliseconds
-        if ($pong.type -ne 'Pong' -or $pong.payload.protocol_version -ne $protocolVersion) {
-            throw [IO.InvalidDataException]::new('The sidecar did not return a protocol v1 Pong.')
-        }
-        [string] $pong.payload.supervisor_version
-    } finally {
-        if ($pipe) { $pipe.Dispose() }
-        $random.Dispose()
-        [Array]::Clear($nonce, 0, $nonce.Length)
-        if ($proof) { [Array]::Clear($proof, 0, $proof.Length) }
+        $process.Dispose()
     }
 }
 
@@ -527,14 +390,7 @@ function Start-BundledSupervisor {
         [string] $DataDirectory
     )
 
-    if ($PipeName -notmatch '^[A-Za-z0-9._-]+$' -or $CredentialTarget.IndexOfAny([char[]] @('"', "`r", "`n", [char] 0)) -ge 0) {
-        Throw-PackageSmokeFailure -Code 'PACKAGE_ARGUMENT_INVALID' -Message 'The smoke pipe or credential target is invalid.'
-    }
-
     $arguments = "--data-dir `"$DataDirectory`" --pipe-name `"$PipeName`""
-    if ($CredentialTarget -ne $productionCredentialTarget) {
-        $arguments += " --credential-target `"$CredentialTarget`""
-    }
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $Path
@@ -559,12 +415,17 @@ function Invoke-BestEffortCleanup {
         try {
             [void] (& $action.Action)
         } catch {
-            "$($action.Name): $($_.Exception.Message)"
+            [string] $action.Name
         }
     }
 }
 
 try {
+    $timeoutSecondsValue = Resolve-BoundedInteger -Value $TimeoutSeconds -Minimum 1 -Maximum 300
+    $installTimeoutSecondsValue = Resolve-BoundedInteger -Value $InstallTimeoutSeconds -Minimum 1 -Maximum 600
+    if ($PipeName -notmatch '^[A-Za-z0-9._-]+$') {
+        Throw-PackageSmokeFailure -Code 'PACKAGE_ARGUMENT_INVALID' -Message 'The smoke pipe name is invalid.'
+    }
     $resolvedBundle = Resolve-BundlePath -RequestedPath $BundlePath
     [void] (New-Item -ItemType Directory -Path $installRoot)
     [void] (New-Item -ItemType Directory -Path $dataRoot)
@@ -572,7 +433,7 @@ try {
     if ((Get-Item -LiteralPath $resolvedBundle).PSIsContainer) {
         Copy-ExtractedArtifact -Source $resolvedBundle -Destination $installRoot
     } elseif ([IO.Path]::GetExtension($resolvedBundle) -ieq '.msi') {
-        Expand-MsiArtifact -MsiPath $resolvedBundle -Destination $installRoot -Timeout $InstallTimeoutSeconds
+        Expand-MsiArtifact -MsiPath $resolvedBundle -Destination $installRoot -Timeout $installTimeoutSecondsValue
     } else {
         Throw-PackageSmokeFailure -Code 'PACKAGE_ARTIFACT_UNSUPPORTED' -Message 'Only an MSI or an extracted artifact directory is supported.'
     }
@@ -580,15 +441,15 @@ try {
     Assert-PackageContents -Root $installRoot
     $desktopPath = Get-SingleBinary -Root $installRoot -Name 'mission-control-desktop.exe' -MissingCode 'PACKAGE_DESKTOP_MISSING'
     $supervisorPath = Get-SingleBinary -Root $installRoot -Name 'mission-control-supervisor.exe' -MissingCode 'PACKAGE_SUPERVISOR_MISSING'
+    $desktopSnapshot = New-BinarySnapshot -Path $desktopPath
+    $supervisorSnapshot = New-BinarySnapshot -Path $supervisorPath
 
-    Add-CredentialInterop
-    $existingSecret = [PackageSmokeCredential]::Read($CredentialTarget)
-    $credentialStateKnown = $true
-    $credentialExisted = $null -ne $existingSecret
-    if ($existingSecret) { [Array]::Clear($existingSecret, 0, $existingSecret.Length) }
-
+    Assert-BinarySnapshot -Snapshot $desktopSnapshot
+    Assert-BinarySnapshot -Snapshot $supervisorSnapshot
     $supervisorProcess = Start-BundledSupervisor -Path $supervisorPath -DataDirectory $dataRoot
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    Assert-BinarySnapshot -Snapshot $desktopSnapshot
+    Assert-BinarySnapshot -Snapshot $supervisorSnapshot
+    $deadline = [DateTime]::UtcNow.AddSeconds($timeoutSecondsValue)
     $readyPath = Join-Path $dataRoot 'supervisor.ready'
     while (-not (Test-Path -LiteralPath $readyPath) -and [DateTime]::UtcNow -lt $deadline) {
         if ($supervisorProcess.HasExited) { break }
@@ -602,22 +463,19 @@ try {
         Throw-PackageSmokeFailure -Code 'PACKAGE_HANDSHAKE_FAILED' -Message 'The bundled Supervisor published an invalid ready record.'
     }
 
-    try {
-        $secret = Wait-CredentialSecret -Target $CredentialTarget -Deadline $deadline
-        $version = Invoke-ProtocolHandshake -Name $PipeName -Secret $secret -TimeoutMilliseconds ($TimeoutSeconds * 1000)
-    } catch {
+    $remainingMilliseconds = [int] [Math]::Floor(($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+    if ($remainingMilliseconds -le 0) {
         Throw-PackageSmokeFailure -Code 'PACKAGE_HANDSHAKE_FAILED' -Message 'The bundled Supervisor failed the authenticated protocol v1 Ping/Pong.'
-    } finally {
-        if ($secret) { [Array]::Clear($secret, 0, $secret.Length) }
     }
+    $clientResult = Invoke-PackageSmokeClient -Name $PipeName -TimeoutMilliseconds $remainingMilliseconds
 
     $result = [ordered]@{
         ok = $true
         artifact = $resolvedBundle
         desktop = [IO.Path]::GetFileName($desktopPath)
         supervisor = [IO.Path]::GetFileName($supervisorPath)
-        protocolVersion = $protocolVersion
-        supervisorVersion = $version
+        protocolVersion = $clientResult.protocolVersion
+        supervisorVersion = $clientResult.supervisorVersion
     }
 } catch {
     $failure = $_
@@ -627,11 +485,8 @@ try {
             Name = 'supervisor'
             Action = {
                 try {
-                    if ($script:supervisorProcess -and -not $script:supervisorProcess.HasExited) {
-                        Stop-Process -Id $script:supervisorProcess.Id -Force -ErrorAction Stop
-                        if (-not $script:supervisorProcess.WaitForExit(5000)) {
-                            throw 'The bundled Supervisor did not exit during cleanup.'
-                        }
+                    if ($script:supervisorProcess) {
+                        Stop-OwnedProcess -Process $script:supervisorProcess -Description 'The bundled Supervisor'
                     }
                 } finally {
                     if ($script:supervisorProcess) { $script:supervisorProcess.Dispose() }
@@ -642,22 +497,11 @@ try {
             Name = 'installer'
             Action = {
                 try {
-                    if ($script:installerProcess -and -not $script:installerProcess.HasExited) {
-                        Stop-Process -Id $script:installerProcess.Id -Force -ErrorAction Stop
-                        if (-not $script:installerProcess.WaitForExit(5000)) {
-                            throw 'The MSI installer did not exit during cleanup.'
-                        }
+                    if ($script:installerProcess) {
+                        Stop-OwnedProcess -Process $script:installerProcess -Description 'The MSI installer'
                     }
                 } finally {
                     if ($script:installerProcess) { $script:installerProcess.Dispose() }
-                }
-            }
-        }
-        [pscustomobject]@{
-            Name = 'credential'
-            Action = {
-                if ($script:credentialStateKnown -and -not $script:credentialExisted) {
-                    [PackageSmokeCredential]::DeleteIfPresent($script:CredentialTarget)
                 }
             }
         }
@@ -674,8 +518,7 @@ try {
     if ($cleanupErrors.Count -gt 0) {
         $originalCode = if ($failure) { Get-FailureCode -ErrorRecord $failure } else { 'none' }
         try {
-            Throw-PackageSmokeFailure -Code 'PACKAGE_CLEANUP_FAILED' `
-                -Message "Package cleanup failed: $($cleanupErrors -join '; '); original=$originalCode."
+            Throw-PackageCleanupFailure -OriginalCode $originalCode -FailedActions $cleanupErrors
         } catch {
             $failure = $_
         }

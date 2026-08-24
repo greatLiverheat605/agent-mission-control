@@ -1,5 +1,7 @@
 #[cfg(windows)]
 pub mod ipc;
+#[cfg(windows)]
+pub mod package_smoke;
 pub mod single_instance;
 
 use std::ffi::OsString;

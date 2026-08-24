@@ -21,7 +21,7 @@
     "tauri:dev": "npm run tauri:dev --workspaces --if-present",
     "tauri:build": "npm run tauri:build --workspaces --if-present",
     "verify:workspace": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-workspace.ps1",
-    "test:package": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"Invoke-Pester -Path 'scripts/tests/package-smoke.Tests.ps1' -CI\"",
+    "test:package": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"Import-Module Pester -RequiredVersion 5.7.1 -Force; Invoke-Pester -Path 'scripts/tests/package-smoke.Tests.ps1' -CI\"",
     "package:smoke": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-smoke.ps1",
     "verify:release": "npm run verify:release --workspaces --if-present"
   }

@@ -7,6 +7,10 @@ edition.workspace = true
 name = "mission-control-supervisor"
 path = "src/main.rs"
 
+[[bin]]
+name = "mission-control-package-smoke"
+path = "src/bin/package_smoke_client.rs"
+
 [features]
 test-credential-target = []
 

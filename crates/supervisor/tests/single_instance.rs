@@ -35,6 +35,8 @@ use mission_protocol::handshake::{
     ClientMessage, Handshake, InstallSecretProvider, NONCE_BYTES, PRODUCT_INSTALL_ID,
     PROTOCOL_VERSION, ServerMessage, handshake_proof,
 };
+#[cfg(any(debug_assertions, feature = "test-credential-target"))]
+use mission_supervisor::package_smoke::authenticated_ping_with_provider;
 
 struct TestProcess {
     child: Child,
@@ -389,6 +391,52 @@ fn a_named_instance_excludes_competitors_and_releases_after_exit() {
     drop(second);
     drop(first);
     assert_test_credential_missing(&credential_target);
+    fs::remove_dir_all(&data_dir).expect("remove isolated test data dir");
+}
+
+#[cfg(any(debug_assertions, feature = "test-credential-target"))]
+#[test]
+fn package_smoke_client_creates_a_clean_credential_before_authentication() {
+    let _serial = PROCESS_TEST_LOCK.lock().expect("lock process tests");
+    let data_dir = unique_test_dir();
+    fs::create_dir_all(&data_dir).expect("create isolated test data dir");
+    let ready_path = data_dir.join("supervisor.ready");
+    let pipe_name = format!(
+        "mission-package-client-clean-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is after the Unix epoch")
+            .as_nanos()
+    );
+    let target = test_credential_target(&pipe_name);
+    delete_test_credential(&target);
+    assert_test_credential_missing(&target);
+    let mut supervisor = TestProcess::spawn(&pipe_name, &data_dir);
+    wait_for_ready(&ready_path, supervisor.id(), &pipe_name);
+
+    let result = authenticated_ping_with_provider(
+        &pipe_name,
+        WindowsCredentialInstallSecret::for_test_target(target.clone())
+            .expect("accept unique package smoke credential target"),
+        Duration::from_secs(2),
+    )
+    .expect("clean credential target authenticates without deadlock");
+
+    assert_eq!(result.protocol_version, PROTOCOL_VERSION);
+    assert_eq!(result.supervisor_version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        WindowsCredentialInstallSecret::for_test_target(target.clone())
+            .expect("reopen package smoke credential target")
+            .install_secret()
+            .expect("read created package smoke credential")
+            .len(),
+        32
+    );
+
+    supervisor.terminate();
+    drop(supervisor);
+    assert_test_credential_missing(&target);
     fs::remove_dir_all(&data_dir).expect("remove isolated test data dir");
 }
 

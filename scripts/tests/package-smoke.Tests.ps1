@@ -51,7 +51,7 @@ Describe 'package-smoke.ps1' {
                 $stderrTask = $process.StandardError.ReadToEndAsync()
                 $timedOut = -not $process.WaitForExit($TimeoutMilliseconds)
                 if ($timedOut) {
-                    Stop-Process -Id $childId -Force -ErrorAction Stop
+                    $process.Kill()
                     if (-not $process.WaitForExit(5000)) {
                         throw "Timed-out child PID $childId did not exit during reap."
                     }
@@ -75,7 +75,7 @@ Describe 'package-smoke.ps1' {
                 }
             } finally {
                 if (-not $process.HasExited) {
-                    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                    try { $process.Kill() } catch {}
                     [void] $process.WaitForExit(5000)
                 }
                 $process.Dispose()
@@ -104,12 +104,12 @@ Describe 'package-smoke.ps1' {
                 [Parameter(Mandatory)]
                 [string] $BundlePath,
 
-                [int] $TimeoutSeconds = 1
+                $TimeoutSeconds = 1,
+
+                $InstallTimeoutSeconds = 120
             )
 
             $pipeName = "mission-package-smoke-$([guid]::NewGuid().ToString('N'))"
-            $credentialTarget = "Agent Mission Control/Package Smoke/$([guid]::NewGuid().ToString('N'))"
-            $script:credentialTargets.Add($credentialTarget)
             $arguments = @(
                 '-NoProfile',
                 '-NonInteractive',
@@ -117,12 +117,12 @@ Describe 'package-smoke.ps1' {
                 '-File', ('"{0}"' -f $smokeScript),
                 '-BundlePath', ('"{0}"' -f $BundlePath),
                 '-PipeName', $pipeName,
-                '-CredentialTarget', ('"{0}"' -f $credentialTarget),
-                '-TimeoutSeconds', $TimeoutSeconds
+                '-TimeoutSeconds', $TimeoutSeconds,
+                '-InstallTimeoutSeconds', $InstallTimeoutSeconds
             ) -join ' '
 
             $result = Invoke-BoundedProcess -FileName $powerShell -Arguments $arguments `
-                -TimeoutMilliseconds (($TimeoutSeconds + 10) * 1000)
+                -TimeoutMilliseconds 15000
             if ($result.TimedOut -or -not $result.Reaped) {
                 throw "Package smoke child PID $($result.Pid) exceeded its harness deadline."
             }
@@ -154,72 +154,14 @@ Describe 'package-smoke.ps1' {
         }
     }
 
-    BeforeEach {
-        $script:credentialTargets = [Collections.Generic.List[string]]::new()
-    }
+    It 'keeps protocol and Credential Manager ownership in the Rust smoke client' {
+        $scriptText = Get-Content -Raw -Encoding utf8 -LiteralPath $smokeScript
 
-    It 'computes protocol v1 proofs with HMAC-SHA256 on Windows PowerShell' {
-        $definitions = Get-PackageSmokeFunctions -Names @(
-            'Write-UInt32LittleEndian',
-            'New-HandshakeProof'
-        )
-        $proofScript = [scriptblock]::Create($definitions + @'
-$productInstallId = 'mission-control-desktop-v1'
-$protocolVersion = 1
-$secret = [byte[]] (0..31)
-$nonce = [byte[]] (32..63)
-$proof = New-HandshakeProof -Secret $secret -Nonce $nonce
-(($proof | ForEach-Object { $_.ToString('x2') }) -join '')
-'@)
-
-        (& $proofScript) | Should -Be 'bd5b23b3a234ccac320572b35275e24c80fff88b7c776d5d6d420c316bf77573'
-    }
-
-    It 'bounds frame writes when a connected pipe never drains its full buffer' {
-        $definitions = Get-PackageSmokeFunctions -Names @(
-            'Write-UInt32LittleEndian',
-            'Wait-StreamTaskWithDeadline',
-            'Write-Frame'
-        )
-        $probe = Join-Path $TestDrive 'stalled-frame-write.ps1'
-        [IO.File]::WriteAllText($probe, $definitions + @'
-$ErrorActionPreference = 'Stop'
-$name = "mission-package-write-$([guid]::NewGuid().ToString('N'))"
-$server = New-Object IO.Pipes.NamedPipeServerStream -ArgumentList $name,
-    ([IO.Pipes.PipeDirection]::InOut), 1, ([IO.Pipes.PipeTransmissionMode]::Byte),
-    ([IO.Pipes.PipeOptions]::Asynchronous), 128, 128
-$wait = $server.WaitForConnectionAsync()
-$client = New-Object IO.Pipes.NamedPipeClientStream -ArgumentList '.', $name,
-    ([IO.Pipes.PipeDirection]::InOut), ([IO.Pipes.PipeOptions]::Asynchronous)
-try {
-    $client.Connect(1000)
-    if (-not $wait.Wait(1000)) { throw 'server did not connect' }
-    $message = [ordered]@{ type = 'Probe'; payload = ('x' * 1048576) }
-    $parameters = (Get-Command Write-Frame).Parameters
-    try {
-        if ($parameters.ContainsKey('TimeoutMilliseconds')) {
-            Write-Frame -Stream $client -Message $message -TimeoutMilliseconds 100
-        } else {
-            Write-Frame -Stream $client -Message $message
-        }
-        throw 'frame write unexpectedly completed'
-    } catch [TimeoutException] {
-        'write-timeout'
-    }
-} finally {
-    $client.Dispose()
-    $server.Dispose()
-}
-'@, (New-Object Text.UTF8Encoding -ArgumentList $false))
-
-        $arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$probe`""
-        $result = Invoke-BoundedProcess -FileName $powerShell -Arguments $arguments -TimeoutMilliseconds 3000
-
-        $result.TimedOut | Should -BeFalse
-        $result.Reaped | Should -BeTrue
-        $result.ExitCode | Should -Be 0
-        $result.StdOut.TrimEnd([char[]] @("`r", "`n")) | Should -BeExactly 'write-timeout'
-        $result.StdErr | Should -BeExactly ''
+        $scriptText | Should -Match 'target\\release\\mission-control-package-smoke\.exe'
+        $scriptText | Should -Not -Match 'Add-CredentialInterop|PackageSmokeCredential|CredDelete|CredRead'
+        $scriptText | Should -Not -Match 'Write-UInt32LittleEndian|New-HandshakeProof|Write-Frame|Read-Frame|Read-Exact|Wait-CredentialSecret|Invoke-ProtocolHandshake'
+        $scriptText | Should -Not -Match '(?m)^\s*\[string\]\s*\$CredentialTarget'
+        $scriptText | Should -Not -Match '--credential-target'
     }
 
     It 'bounds and reaps a child that fills both output pipes and waits forever' {
@@ -237,6 +179,21 @@ while ($true) { Start-Sleep -Seconds 1 }
         $result.Reaped | Should -BeTrue
         $result.StdOut.Length | Should -Be 131072
         $result.StdErr.Length | Should -Be 131072
+    }
+
+    It 'terminates an owned process through the retained process object' {
+        $definitions = Get-PackageSmokeFunctions -Names @('Stop-OwnedProcess')
+        $stopScript = [scriptblock]::Create($definitions + @'
+$events = [Collections.Generic.List[string]]::new()
+$process = [pscustomobject]@{ HasExited = $false; Id = 4242 }
+$process | Add-Member -MemberType ScriptMethod -Name Kill -Value { [void] $events.Add('kill') }
+$process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($timeout) [void] $events.Add("wait:$timeout"); $true }
+Stop-OwnedProcess -Process $process -Description 'fixture' -TimeoutMilliseconds 321
+@($events)
+'@)
+
+        (& $stopScript) | Should -Be @('kill', 'wait:321')
+        (Get-Content -Raw -Encoding utf8 -LiteralPath $smokeScript) | Should -Not -Match 'Stop-Process\s+-Id'
     }
 
     It 'runs credential and temp cleanup after an earlier owned-resource cleanup fails' {
@@ -257,7 +214,30 @@ $errors = @(Invoke-BestEffortCleanup -Actions $actions)
 
         $result.Events | Should -Be @('supervisor', 'installer', 'credential', 'temp')
         $result.Errors.Count | Should -Be 1
-        $result.Errors[0] | Should -Match '^supervisor: stop failed$'
+        $result.Errors[0] | Should -BeExactly 'supervisor'
+    }
+
+    It 'reports cleanup failure with the stable original code and no exception detail' {
+        $definitions = Get-PackageSmokeFunctions -Names @(
+            'Throw-PackageSmokeFailure',
+            'Throw-PackageCleanupFailure'
+        )
+        $cleanupScript = [scriptblock]::Create($definitions + @'
+try {
+    Throw-PackageCleanupFailure -OriginalCode 'PACKAGE_HANDSHAKE_FAILED' -FailedActions @('supervisor: leaked-secret-value')
+} catch {
+    [pscustomobject]@{
+        Code = $_.Exception.Data['PackageSmokeCode']
+        Message = $_.Exception.Message
+    }
+}
+'@)
+
+        $result = & $cleanupScript
+
+        $result.Code | Should -BeExactly 'PACKAGE_CLEANUP_FAILED'
+        $result.Message | Should -Match 'original=PACKAGE_HANDSHAKE_FAILED'
+        $result.Message | Should -Not -Match 'leaked-secret-value'
     }
 
     It 'does not normalize extra output around failure contracts' {
@@ -290,6 +270,22 @@ exit 1
         $result = Invoke-PackageSmokeFixture -BundlePath $artifact
 
         Assert-PackageSmokeFailure -Result $result -ExpectedCode 'PACKAGE_SUPERVISOR_MISSING'
+    }
+
+    It 'returns one stable JSON error for a non-numeric timeout' {
+        $artifact = New-PackageFixture -Desktop -Supervisor
+
+        $result = Invoke-PackageSmokeFixture -BundlePath $artifact -TimeoutSeconds 'not-a-number'
+
+        Assert-PackageSmokeFailure -Result $result -ExpectedCode 'PACKAGE_ARGUMENT_INVALID'
+    }
+
+    It 'returns one stable JSON error for an out-of-range install timeout' {
+        $artifact = New-PackageFixture -Desktop -Supervisor
+
+        $result = Invoke-PackageSmokeFixture -BundlePath $artifact -InstallTimeoutSeconds 601
+
+        Assert-PackageSmokeFailure -Result $result -ExpectedCode 'PACKAGE_ARGUMENT_INVALID'
     }
 
     It 'fails within the deadline when the installed sidecar cannot authenticate protocol v1' {
@@ -342,10 +338,45 @@ exit 1
         Assert-PackageSmokeFailure -Result $result -ExpectedCode 'PACKAGE_FORBIDDEN_SECRET'
     }
 
-    AfterEach {
-        foreach ($target in $script:credentialTargets) {
-            & cmdkey.exe "/delete:$target" *> $null
-        }
+    It 'rejects a reparse point before recursively scanning package contents' {
+        $artifact = New-PackageFixture -Desktop -Supervisor
+        $outside = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        [void] (New-Item -ItemType Directory -Path $outside)
+        [void] (New-Item -ItemType Junction -Path (Join-Path $artifact 'linked') -Target $outside)
+
+        $result = Invoke-PackageSmokeFixture -BundlePath $artifact
+
+        Assert-PackageSmokeFailure -Result $result -ExpectedCode 'PACKAGE_REPARSE_POINT'
+    }
+
+    It 'rejects the build-only Rust smoke client inside an extracted package' {
+        $artifact = New-PackageFixture -Desktop -Supervisor
+        [IO.File]::WriteAllBytes((Join-Path $artifact 'mission-control-package-smoke.exe'), [byte[]] @(0))
+
+        $result = Invoke-PackageSmokeFixture -BundlePath $artifact
+
+        Assert-PackageSmokeFailure -Result $result -ExpectedCode 'PACKAGE_FORBIDDEN_HELPER'
+    }
+
+    It 'detects binary replacement between package scan and launch' {
+        $definitions = Get-PackageSmokeFunctions -Names @(
+            'Throw-PackageSmokeFailure',
+            'New-BinarySnapshot',
+            'Assert-BinarySnapshot'
+        )
+        $snapshotScript = [scriptblock]::Create($definitions + @'
+$path = Join-Path $env:TEMP "mission-snapshot-$([guid]::NewGuid().ToString('N')).exe"
+try {
+    [IO.File]::WriteAllBytes($path, [byte[]] @(1, 2, 3))
+    $snapshot = New-BinarySnapshot -Path $path
+    [IO.File]::WriteAllBytes($path, [byte[]] @(1, 2, 3, 4))
+    try { Assert-BinarySnapshot -Snapshot $snapshot } catch { $_.Exception.Data['PackageSmokeCode'] }
+} finally {
+    Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+}
+'@)
+
+        (& $snapshotScript) | Should -BeExactly 'PACKAGE_BINARY_CHANGED'
     }
 }
 
@@ -354,6 +385,7 @@ Describe 'Windows package CI contract' {
         $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
         $workflowPath = Join-Path $repositoryRoot '.github\workflows\windows-ci.yml'
         $verifyPath = Join-Path $repositoryRoot 'scripts\verify-workspace.ps1'
+        $prerequisitePath = Join-Path $repositoryRoot 'scripts\verify-prerequisites.ps1'
         $packagePath = Join-Path $repositoryRoot 'package.json'
         $desktopPackagePath = Join-Path $repositoryRoot 'apps\desktop\package.json'
         $tauri = Join-Path $repositoryRoot 'node_modules\.bin\tauri.cmd'
@@ -371,6 +403,20 @@ Describe 'Windows package CI contract' {
         $workflow | Should -Match 'Invoke-Pester.*package-smoke\.Tests\.ps1.*-CI'
         $workflow | Should -Match 'npm\.cmd run tauri:build'
         $workflow | Should -Match 'scripts/package-smoke\.ps1'
+    }
+
+    It 'pins every third-party action and Pester to reviewed immutable versions' {
+        $workflow = Get-Content -Raw -Encoding utf8 -LiteralPath $workflowPath
+        $prerequisites = Get-Content -Raw -Encoding utf8 -LiteralPath $prerequisitePath
+
+        $workflow | Should -Match 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262'
+        $workflow | Should -Match 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020'
+        $workflow | Should -Match 'actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830'
+        $workflow | Should -Match 'Install-Module Pester -RequiredVersion 5\.7\.1 -Scope CurrentUser -Force'
+        $workflow | Should -Match 'Import-Module Pester -RequiredVersion 5\.7\.1 -Force'
+        $workflow | Should -Not -Match 'MinimumVersion|SkipPublisherCheck'
+        $prerequisites | Should -Match "\[Version\]\s*'5\.7\.1'"
+        $prerequisites | Should -Match 'Where-Object\s+Version\s+-EQ\s+\$requiredVersion'
     }
 
     It 'keys the Windows cache from both lockfiles and the Rust toolchain' {
@@ -405,6 +451,7 @@ Describe 'Windows package CI contract' {
 
         $sidecarConfig.bundle.targets | Should -Be 'msi'
         @($sidecarConfig.bundle.icon) | Should -Be @('generated/mission-control.ico')
+        @($sidecarConfig.bundle.externalBin) | Should -Be @('binaries/mission-control-supervisor')
         $desktopPackage.scripts.'prepare:sidecar' | Should -MatchExactly '^cargo build -p mission-supervisor --release --locked --offline && node ../../scripts/prepare-sidecar\.mjs$'
         $desktopPackage.scripts.'tauri:build' | Should -Match 'tauri build --config src-tauri/tauri\.sidecar\.conf\.json -- --locked --offline$'
         $help = & $tauri build --help | Out-String

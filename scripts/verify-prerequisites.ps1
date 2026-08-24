@@ -62,18 +62,17 @@ function Test-CommandVersion {
 }
 
 function Test-PesterVersion {
-    $module = Get-Module -ListAvailable Pester | Sort-Object Version -Descending | Select-Object -First 1
+    $requiredVersion = [Version] '5.7.1'
+    $module = Get-Module -ListAvailable Pester |
+        Where-Object Version -EQ $requiredVersion |
+        Sort-Object Version -Descending |
+        Select-Object -First 1
     if (-not $module) {
-        $messages.Add('Pester 5 or newer is not installed.')
+        $messages.Add("Pester $requiredVersion is not installed.")
         return New-CheckResult -Status missing
     }
 
-    $status = if ($module.Version.Major -ge 5) { 'ok' } else { 'unsupported' }
-    if ($status -ne 'ok') {
-        $messages.Add("Pester $($module.Version) is installed; version 5 or newer is required.")
-    }
-
-    New-CheckResult -Status $status -Version $module.Version.ToString() -Major $module.Version.Major -Path $module.Path
+    New-CheckResult -Status ok -Version $module.Version.ToString() -Major $module.Version.Major -Path $module.Path
 }
 
 function Test-WebView2Runtime {
