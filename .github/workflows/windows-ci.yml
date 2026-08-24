@@ -1,0 +1,90 @@
+name: Windows CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-package:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Restore Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-${{ hashFiles('Cargo.lock', 'package-lock.json', 'rust-toolchain.toml') }}
+
+      - name: Install test prerequisite
+        shell: powershell
+        run: Install-Module Pester -MinimumVersion 5.0.0 -Scope CurrentUser -Force -SkipPublisherCheck
+
+      - name: Verify prerequisites
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-prerequisites.ps1
+
+      - name: Restore Node dependencies
+        shell: powershell
+        run: npm.cmd ci
+
+      - name: Restore Rust dependencies
+        shell: powershell
+        run: cargo fetch --locked
+
+      - name: Check Rust formatting
+        shell: powershell
+        run: cargo fmt --all -- --check
+
+      - name: Lint Rust workspace
+        shell: powershell
+        run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
+
+      - name: Test Rust workspace
+        shell: powershell
+        run: cargo test --workspace --all-targets --locked --offline
+
+      - name: Verify locked workspace metadata
+        shell: powershell
+        run: cargo metadata --locked --offline --no-deps --format-version 1
+
+      - name: Verify workspace boundary
+        shell: powershell
+        run: node --test scripts/tests/workspace-boundaries.test.mjs
+
+      - name: Test desktop renderer
+        shell: powershell
+        run: npm.cmd run test --workspace @mission-control/desktop
+
+      - name: Typecheck desktop renderer
+        shell: powershell
+        run: npm.cmd run typecheck --workspace @mission-control/desktop
+
+      - name: Build desktop renderer
+        shell: powershell
+        run: npm.cmd run build --workspace @mission-control/desktop
+
+      - name: Test package smoke failures
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Invoke-Pester -Path 'scripts/tests/package-smoke.Tests.ps1' -CI"
+
+      - name: Build unsigned Tauri package
+        shell: powershell
+        run: npm.cmd run tauri:build
+
+      - name: Verify installed package
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-smoke.ps1

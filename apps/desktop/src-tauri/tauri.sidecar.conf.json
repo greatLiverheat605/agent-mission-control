@@ -1,5 +1,7 @@
 {
   "bundle": {
-    "externalBin": ["binaries/mission-control-supervisor"]
+    "externalBin": ["binaries/mission-control-supervisor"],
+    "icon": ["generated/mission-control.ico"],
+    "targets": "msi"
   }
 }

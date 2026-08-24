@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "tauri:dev": "cargo build -p mission-supervisor && tauri dev",
-    "prepare:sidecar": "cargo build -p mission-supervisor --release && node -e \"const fs=require('node:fs');fs.mkdirSync('src-tauri/binaries',{recursive:true});fs.copyFileSync('../../target/release/mission-control-supervisor.exe','src-tauri/binaries/mission-control-supervisor-x86_64-pc-windows-msvc.exe')\"",
+    "prepare:sidecar": "cargo build -p mission-supervisor --release && node ../../scripts/prepare-sidecar.mjs",
     "tauri:build": "npm run prepare:sidecar && tauri build --config src-tauri/tauri.sidecar.conf.json"
   },
   "dependencies": {
