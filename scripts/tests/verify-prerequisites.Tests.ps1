@@ -31,14 +31,14 @@ Describe 'verify-prerequisites.ps1' {
                 [Parameter(Mandatory)]
                 [string] $Directory,
 
-                [string] $NodeOutput = 'v24.18.0',
+                [string] $NodeOutput = 'v24.18.0-rc.1+build.5',
 
-                [string] $CargoOutput = 'cargo 1.98.0 (797e8a9bc 2026-08-05)'
+                [string] $CargoOutput = 'cargo 1.98.0-nightly (797e8a9bc 2026-08-05)'
             )
 
             New-CommandShim -Directory $Directory -Name node -Output $NodeOutput
             New-CommandShim -Directory $Directory -Name git -Output 'git version 2.55.0.windows.3'
-            New-CommandShim -Directory $Directory -Name rustc -Output 'rustc 1.98.0 (88d9e12ae 2026-08-18)'
+            New-CommandShim -Directory $Directory -Name rustc -Output 'rustc 1.98.0-nightly (88d9e12ae 2026-08-18)'
             New-CommandShim -Directory $Directory -Name cargo -Output $CargoOutput
         }
 
@@ -110,8 +110,8 @@ Describe 'verify-prerequisites.ps1' {
         }
     }
 
-    It 'reports invalid cargo version output as unsupported JSON' {
-        New-SupportedToolchainShims -Directory $shimPath -CargoOutput 'cargo output without a version'
+    It 'reports an incomplete cargo version as unsupported JSON' {
+        New-SupportedToolchainShims -Directory $shimPath -CargoOutput 'cargo 1.not-a-version'
 
         $result = Invoke-PrerequisiteVerification -ShimPath $shimPath -SkipWebView2
 
@@ -119,6 +119,17 @@ Describe 'verify-prerequisites.ps1' {
         $json = $result.StdOut | ConvertFrom-Json
         $json.cargo.status | Should -Be 'unsupported'
         $json.messages -join ' ' | Should -Match 'Cargo.*unsupported version output'
+    }
+
+    It 'reports an incomplete node version as unsupported JSON' {
+        New-SupportedToolchainShims -Directory $shimPath -NodeOutput 'v24.not-a-version'
+
+        $result = Invoke-PrerequisiteVerification -ShimPath $shimPath -SkipWebView2
+
+        $result.ExitCode | Should -Be 1
+        $json = $result.StdOut | ConvertFrom-Json
+        $json.node.status | Should -Be 'unsupported'
+        $json.messages -join ' ' | Should -Match 'Node.js.*unsupported version output'
     }
 
     It 'reports an oversized node major as unsupported JSON' {

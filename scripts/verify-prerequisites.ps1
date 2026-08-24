@@ -109,15 +109,15 @@ function Test-WebView2Runtime {
     New-CheckResult -Status missing
 }
 
-$node = Test-CommandVersion -Name node -DisplayName Node.js -VersionPattern '^v(?<major>\d+)\.'
+$node = Test-CommandVersion -Name node -DisplayName Node.js -VersionPattern '^v(?<major>\d+)\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$'
 if ($node.status -eq 'ok' -and $node.major -ne 24) {
     $node.status = 'unsupported'
     $messages.Add("Node.js 24 is required; found $($node.version).")
 }
 
-$git = Test-CommandVersion -Name git -DisplayName Git -VersionPattern '^git version (?<major>\d+)\.'
-$rust = Test-CommandVersion -Name rustc -DisplayName Rust -VersionPattern '^rustc (?<major>\d+)\.'
-$cargo = Test-CommandVersion -Name cargo -DisplayName Cargo -VersionPattern '^cargo (?<major>\d+)\.'
+$git = Test-CommandVersion -Name git -DisplayName Git -VersionPattern '^git version (?<major>\d+)\.\d+\.\d+(?:\.[0-9A-Za-z-]+)*$'
+$rust = Test-CommandVersion -Name rustc -DisplayName Rust -VersionPattern '^rustc (?<major>\d+)\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?: \([^)]+\))?$'
+$cargo = Test-CommandVersion -Name cargo -DisplayName Cargo -VersionPattern '^cargo (?<major>\d+)\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?: \([^)]+\))?$'
 $pester = Test-PesterVersion
 $webview2 = Test-WebView2Runtime
 
