@@ -14,12 +14,12 @@ Install these prerequisites from their official sources:
 | Visual Studio 2022 Build Tools | **Desktop development with C++** workload | [Build Tools for Visual Studio 2022](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) |
 | Windows SDK | Windows 10 or Windows 11 SDK, selected in Visual Studio Installer | [Windows SDK](https://developer.microsoft.com/windows/downloads/windows-sdk/) |
 | WebView2 Runtime | Evergreen Runtime | [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) |
-| Pester | Version 5 or newer | [PowerShell Gallery](https://www.powershellgallery.com/packages/Pester) |
+| Pester | Exact version `5.7.1` | [PowerShell Gallery](https://www.powershellgallery.com/packages/Pester/5.7.1) |
 
 Use the Visual Studio Installer to add or repair the C++ workload and Windows SDK. Install Pester separately from an elevated PowerShell prompt when a machine-wide installation is required:
 
 ```powershell
-Install-Module Pester -MinimumVersion 5.0 -Scope AllUsers -Force -SkipPublisherCheck
+Install-Module Pester -RequiredVersion 5.7.1 -Scope AllUsers -Force
 ```
 
 Open a new terminal after installing Rust so the Cargo bin directory is present in `PATH`.
@@ -35,7 +35,7 @@ node --version
 npm.cmd --version
 git --version
 Get-Module -ListAvailable Pester |
-    Sort-Object Version -Descending |
+    Where-Object Version -EQ ([Version] '5.7.1') |
     Select-Object -First 1 Name, Version, Path
 
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
@@ -62,10 +62,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-prerequ
 
 The command exits with code `1` when a required item is missing or unsupported. Use `-SkipWebView2` only for workflows that do not build or run the WebView2 desktop application.
 
-Run the prerequisite tests with Pester 5 or newer:
+Run the prerequisite tests with Pester `5.7.1`:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "`$ErrorActionPreference = 'Stop'; Import-Module Pester -MinimumVersion 5.0; `$result = Invoke-Pester .\scripts\tests\verify-prerequisites.Tests.ps1 -PassThru; if (`$null -eq `$result -or `$result.FailedCount -gt 0) { exit 1 }"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "`$ErrorActionPreference = 'Stop'; Import-Module Pester -RequiredVersion 5.7.1 -Force; `$result = Invoke-Pester .\scripts\tests\verify-prerequisites.Tests.ps1 -PassThru; if (`$null -eq `$result -or `$result.FailedCount -gt 0) { exit 1 }"
 ```
 
 ## Troubleshooting

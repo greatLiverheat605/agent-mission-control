@@ -16,6 +16,7 @@ use windows_sys::Win32::System::Threading::{GetCurrentThreadId, OpenThread, THRE
 
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const CANCELLATION_GRACE_PERIOD: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageSmokeSuccess {
@@ -81,7 +82,7 @@ where
             return join_worker(worker, PackageSmokeClientError::WorkerDidNotStop);
         }
         Err(RecvTimeoutError::Timeout) => {
-            return join_worker(worker, PackageSmokeClientError::Timeout);
+            return join_worker_bounded(worker, PackageSmokeClientError::Timeout);
         }
     };
 
@@ -91,14 +92,19 @@ where
             join_worker(worker, PackageSmokeClientError::WorkerDidNotStop)
         }
         Err(RecvTimeoutError::Timeout) => {
+            let cancellation_deadline = Instant::now() + CANCELLATION_GRACE_PERIOD;
             while !worker.is_finished() {
                 let _ = target.cancel();
-                match done_rx.recv_timeout(CANCELLATION_POLL_INTERVAL) {
+                let wait = remaining(cancellation_deadline).min(CANCELLATION_POLL_INTERVAL);
+                if wait.is_zero() {
+                    break;
+                }
+                match done_rx.recv_timeout(wait) {
                     Ok(_) | Err(RecvTimeoutError::Disconnected) => break,
                     Err(RecvTimeoutError::Timeout) => {}
                 }
             }
-            join_worker(worker, PackageSmokeClientError::Timeout)
+            join_worker_bounded(worker, PackageSmokeClientError::Timeout)
         }
     }
 }
@@ -215,6 +221,22 @@ fn join_worker(
         .join()
         .map_err(|_| PackageSmokeClientError::WorkerDidNotStop)?;
     Err(result)
+}
+
+fn join_worker_bounded(
+    worker: thread::JoinHandle<()>,
+    result: PackageSmokeClientError,
+) -> Result<PackageSmokeSuccess, PackageSmokeClientError> {
+    let deadline = Instant::now() + CANCELLATION_GRACE_PERIOD;
+    while !worker.is_finished() && Instant::now() < deadline {
+        thread::sleep(CANCELLATION_POLL_INTERVAL);
+    }
+    if worker.is_finished() {
+        join_worker(worker, result)
+    } else {
+        drop(worker);
+        Err(PackageSmokeClientError::WorkerDidNotStop)
+    }
 }
 
 fn join_worker_result(
