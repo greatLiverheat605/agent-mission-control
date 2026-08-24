@@ -13,6 +13,12 @@ use supervisor_bridge::{
     SupervisorTransport,
 };
 
+macro_rules! command_names {
+    ($($command:ident),+ $(,)?) => {
+        [$(stringify!($command)),+]
+    };
+}
+
 static PIPE_NONCE: AtomicU64 = AtomicU64::new(0);
 const FIXTURE_SECRET: &[u8] = b"desktop-bridge-fixture-secret";
 
@@ -86,10 +92,13 @@ impl SupervisorTransport for StartsThenConnects {
 
 #[test]
 fn bridge_exposes_only_the_two_supervisor_commands() {
+    let expected = ["supervisor_status", "ping_supervisor"];
+
     assert_eq!(
-        supervisor_bridge::ALLOWED_COMMANDS,
-        ["supervisor_status", "ping_supervisor"]
+        supervisor_bridge::supervisor_commands!(command_names),
+        expected
     );
+    assert_eq!(supervisor_bridge::ALLOWED_COMMANDS, expected);
 }
 
 #[test]

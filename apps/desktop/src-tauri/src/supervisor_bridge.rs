@@ -17,7 +17,20 @@ use mission_supervisor::single_instance::{current_user_sid, production_pipe_name
 use serde::Serialize;
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
-pub const ALLOWED_COMMANDS: [&str; 2] = ["supervisor_status", "ping_supervisor"];
+macro_rules! supervisor_commands {
+    ($callback:ident) => {
+        $callback!(supervisor_status, ping_supervisor)
+    };
+}
+pub(crate) use supervisor_commands;
+
+macro_rules! command_names {
+    ($($command:ident),+ $(,)?) => {
+        [$(stringify!($command)),+]
+    };
+}
+
+pub const ALLOWED_COMMANDS: [&str; 2] = supervisor_commands!(command_names);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BridgeError {

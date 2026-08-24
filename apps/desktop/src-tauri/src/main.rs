@@ -9,6 +9,12 @@ use supervisor_bridge::{
 };
 use tauri::{Manager, State};
 
+macro_rules! tauri_handler {
+    ($($command:ident),+ $(,)?) => {
+        tauri::generate_handler![$($command),+]
+    };
+}
+
 type NativeSupervisorBridge = Arc<SupervisorBridge<LocalSupervisorTransport>>;
 
 #[tauri::command]
@@ -34,7 +40,7 @@ fn main() {
             app.manage(Arc::new(SupervisorBridge::new(transport)));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![supervisor_status, ping_supervisor])
+        .invoke_handler(supervisor_bridge::supervisor_commands!(tauri_handler))
         .run(tauri::generate_context!())
         .expect("run Agent Mission Control desktop");
 }
