@@ -156,16 +156,23 @@ fn write_ready_file(data_dir: &std::path::Path, pid: u32, pipe_name: &str) -> io
     let ready_path = data_dir.join("supervisor.ready");
     remove_file_if_exists(&ready_path)?;
 
-    let temp_path = data_dir.join(format!(
-        "supervisor.ready.{pid}.{}.tmp",
-        READY_NONCE.fetch_add(1, Ordering::Relaxed)
-    ));
     let ready =
         serde_json::to_vec(&json!({ "pid": pid, "pipe": pipe_name })).map_err(io::Error::other)?;
-    let mut temp = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp_path)?;
+    let (temp_path, mut temp) = loop {
+        let temp_path = data_dir.join(format!(
+            "supervisor.ready.{pid}.{}.tmp",
+            READY_NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(temp) => break (temp_path, temp),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    };
     let publish = (|| {
         temp.write_all(&ready)?;
         temp.flush()?;
@@ -177,6 +184,21 @@ fn write_ready_file(data_dir: &std::path::Path, pid: u32, pipe_name: &str) -> io
         let _ = remove_file_if_exists(&temp_path);
     }
     publish
+}
+
+struct ReadyFile(PathBuf);
+
+impl ReadyFile {
+    fn publish(data_dir: &std::path::Path, pid: u32, pipe_name: &str) -> io::Result<Self> {
+        write_ready_file(data_dir, pid, pipe_name)?;
+        Ok(Self(data_dir.join("supervisor.ready")))
+    }
+}
+
+impl Drop for ReadyFile {
+    fn drop(&mut self) {
+        let _ = remove_file_if_exists(&self.0);
+    }
 }
 
 pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), RunError> {
@@ -191,8 +213,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), RunError> {
 
     fs::create_dir_all(&config.data_dir)?;
     let pid = std::process::id();
-    let ready_path = config.data_dir.join("supervisor.ready");
-    write_ready_file(&config.data_dir, pid, &pipe_name)?;
+    let _ready_file = ReadyFile::publish(&config.data_dir, pid, &pipe_name)?;
     let mut stdout = io::stdout().lock();
     serde_json::to_writer(
         &mut stdout,
@@ -205,24 +226,26 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), RunError> {
         thread::sleep(Duration::from_millis(50));
     }
 
-    let stopped_result = write_stopped_log(&mut stdout, pid, &pipe_name);
-    let cleanup_result = remove_file_if_exists(&ready_path);
-    stopped_result?;
-    cleanup_result?;
+    write_stopped_log(&mut stdout, pid, &pipe_name)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{remove_file_if_exists, resolve_pipe_name, write_ready_file, write_stopped_log};
+    use super::{
+        READY_NONCE, remove_file_if_exists, resolve_pipe_name, write_ready_file, write_stopped_log,
+    };
 
     static TEST_NONCE: AtomicU64 = AtomicU64::new(0);
+    static READY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn stale_ready_is_replaced_without_leaving_a_temp_file() {
+        let _serial = READY_TEST_LOCK.lock().expect("lock ready tests");
         let data_dir = std::env::temp_dir().join(format!(
             "mission-supervisor-ready-unit-{}-{}",
             std::process::id(),
@@ -247,6 +270,32 @@ mod tests {
         fs::remove_file(data_dir.join("supervisor.ready")).expect("remove ready");
         remove_file_if_exists(&data_dir.join("supervisor.ready"))
             .expect("missing ready cleanup succeeds");
+
+        fs::remove_dir_all(data_dir).expect("remove test data dir");
+    }
+
+    #[test]
+    fn stale_temp_nonce_collision_does_not_block_ready_publish() {
+        let _serial = READY_TEST_LOCK.lock().expect("lock ready tests");
+        READY_NONCE.store(0, Ordering::Relaxed);
+        let data_dir = std::env::temp_dir().join(format!(
+            "mission-supervisor-ready-collision-{}-{}",
+            std::process::id(),
+            TEST_NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&data_dir).expect("create test data dir");
+        fs::write(data_dir.join("supervisor.ready.42.0.tmp"), b"stale").expect("seed stale temp");
+
+        let publish = write_ready_file(&data_dir, 42, "test-pipe");
+        if let Err(error) = publish {
+            fs::remove_dir_all(&data_dir).expect("remove test data dir after publish failure");
+            panic!("stale temp blocked ready publish: {error}");
+        }
+        let ready: serde_json::Value = serde_json::from_slice(
+            &fs::read(data_dir.join("supervisor.ready")).expect("read ready"),
+        )
+        .expect("ready is valid JSON");
+        assert_eq!(ready["pid"], 42);
 
         fs::remove_dir_all(data_dir).expect("remove test data dir");
     }

@@ -1,10 +1,11 @@
 #![cfg(windows)]
 
-use std::fs;
+use std::fs::{self, File};
 use std::io::Read;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -15,6 +16,7 @@ use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
 struct TestProcess(Child);
 
 static TEST_NONCE: AtomicU64 = AtomicU64::new(0);
+static PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 impl TestProcess {
     fn spawn(pipe_name: &str, data_dir: &Path) -> Self {
@@ -38,22 +40,37 @@ impl TestProcess {
                 "debug",
             ],
             creation_flags,
+            Stdio::piped(),
+        )
+    }
+
+    fn spawn_with_stdout(pipe_name: &str, data_dir: &Path, stdout: Stdio) -> Self {
+        Self::spawn_args_with_flags(
+            [
+                "--pipe-name",
+                pipe_name,
+                "--data-dir",
+                data_dir.to_str().expect("test data dir is valid Unicode"),
+            ],
+            0,
+            stdout,
         )
     }
 
     fn spawn_args(args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>) -> Self {
-        Self::spawn_args_with_flags(args, 0)
+        Self::spawn_args_with_flags(args, 0, Stdio::piped())
     }
 
     fn spawn_args_with_flags(
         args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
         creation_flags: u32,
+        stdout: Stdio,
     ) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_mission-control-supervisor"));
         command
             .args(args)
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
+            .stdout(stdout)
             .stderr(Stdio::piped())
             .creation_flags(creation_flags);
         let child = command.spawn().expect("supervisor starts");
@@ -159,6 +176,7 @@ fn wait_for_ready(path: &Path, expected_pid: u32, expected_pipe: &str) {
 
 #[test]
 fn a_named_instance_excludes_competitors_and_releases_after_exit() {
+    let _serial = PROCESS_TEST_LOCK.lock().expect("lock process tests");
     let data_dir = unique_test_dir();
     fs::create_dir_all(&data_dir).expect("create isolated test data dir");
     let ready_path = data_dir.join("supervisor.ready");
@@ -210,6 +228,33 @@ fn a_named_instance_excludes_competitors_and_releases_after_exit() {
     assert_eq!(events[0]["event"], "supervisor.ready");
     assert_eq!(events[1]["event"], "supervisor.stopped");
     assert!(!ready_path.exists(), "graceful shutdown removes ready file");
+
+    fs::remove_dir_all(&data_dir).expect("remove isolated test data dir");
+}
+
+#[test]
+fn output_error_after_ready_publish_removes_the_ready_file() {
+    let _serial = PROCESS_TEST_LOCK.lock().expect("lock process tests");
+    let data_dir = unique_test_dir();
+    fs::create_dir_all(&data_dir).expect("create isolated test data dir");
+    let stdout_path = data_dir.join("read-only-stdout");
+    fs::write(&stdout_path, b"").expect("create stdout target");
+    let stdout = Stdio::from(File::open(&stdout_path).expect("open read-only stdout target"));
+    let ready_path = data_dir.join("supervisor.ready");
+    let mut process =
+        TestProcess::spawn_with_stdout("mission-control-output-error-test", &data_dir, stdout);
+
+    let status = process
+        .wait_for_exit(Duration::from_secs(2))
+        .expect("output failure exits within two seconds");
+    assert_eq!(status.code(), Some(2));
+    let error: serde_json::Value =
+        serde_json::from_str(process.read_stderr().trim()).expect("stderr is structured JSON");
+    assert_eq!(error["errorCode"], "io_error");
+    assert!(
+        !ready_path.exists(),
+        "published ready is removed when ready log output fails"
+    );
 
     fs::remove_dir_all(&data_dir).expect("remove isolated test data dir");
 }
