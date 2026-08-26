@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "adapter-claude"
+version = "0.1.0"
+dependencies = [
+ "adapter-core",
+ "mission-domain",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "adapter-codex"
 version = "0.1.0"
 dependencies = [

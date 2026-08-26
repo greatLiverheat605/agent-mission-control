@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"session-1","model":"claude-sonnet"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]},"session_id":"session-1"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"echo hi"}}]},"session_id":"session-1"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"hi"}]},"session_id":"session-1"}
+{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"session-1"}
