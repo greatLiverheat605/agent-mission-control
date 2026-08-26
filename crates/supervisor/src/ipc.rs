@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use mission_protocol::frame::{FrameError, read_frame, write_frame};
 use mission_protocol::handshake::{
-    ClientMessage, HandshakeVerifier, InstallSecretProvider, Pong, ProtocolError,
+    ClientMessage, CommandResponse, HandshakeVerifier, InstallSecretProvider, Pong, ProtocolError,
     ProtocolErrorCode, ServerMessage,
 };
 use mission_protocol::windows_security::{SecurityAttributes, current_user_sid};
@@ -30,6 +30,29 @@ const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+pub trait IpcDispatcher: Send + Sync {
+    fn dispatch(
+        &self,
+        command: &str,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, String>;
+    fn touch_ui(&self);
+}
+
+struct NoopDispatcher;
+
+impl IpcDispatcher for NoopDispatcher {
+    fn dispatch(
+        &self,
+        _command: &str,
+        _request: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        Err("COMMAND_NOT_AVAILABLE".to_owned())
+    }
+
+    fn touch_ui(&self) {}
+}
+
 pub struct IpcServer {
     stop: Arc<AtomicBool>,
     pipe_path: String,
@@ -41,14 +64,57 @@ impl IpcServer {
     where
         P: InstallSecretProvider + Send + 'static,
     {
-        Self::spawn_with_idle_timeout(pipe_name, install_id, secret_provider, DEFAULT_IDLE_TIMEOUT)
+        Self::spawn_with_dispatcher(
+            pipe_name,
+            install_id,
+            secret_provider,
+            Arc::new(NoopDispatcher),
+        )
     }
 
+    pub fn spawn_with_dispatcher<P>(
+        pipe_name: &str,
+        install_id: &str,
+        secret_provider: P,
+        dispatcher: Arc<dyn IpcDispatcher>,
+    ) -> io::Result<Self>
+    where
+        P: InstallSecretProvider + Send + 'static,
+    {
+        Self::spawn_with_idle_timeout_and_dispatcher(
+            pipe_name,
+            install_id,
+            secret_provider,
+            DEFAULT_IDLE_TIMEOUT,
+            dispatcher,
+        )
+    }
+
+    #[cfg(test)]
     fn spawn_with_idle_timeout<P>(
         pipe_name: &str,
         install_id: &str,
         secret_provider: P,
         idle_timeout: Duration,
+    ) -> io::Result<Self>
+    where
+        P: InstallSecretProvider + Send + 'static,
+    {
+        Self::spawn_with_idle_timeout_and_dispatcher(
+            pipe_name,
+            install_id,
+            secret_provider,
+            idle_timeout,
+            Arc::new(NoopDispatcher),
+        )
+    }
+
+    fn spawn_with_idle_timeout_and_dispatcher<P>(
+        pipe_name: &str,
+        install_id: &str,
+        secret_provider: P,
+        idle_timeout: Duration,
+        dispatcher: Arc<dyn IpcDispatcher>,
     ) -> io::Result<Self>
     where
         P: InstallSecretProvider + Send + 'static,
@@ -59,6 +125,7 @@ impl IpcServer {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let thread_install_id = install_id.to_owned();
+        let thread_dispatcher = Arc::clone(&dispatcher);
         let server_thread = thread::Builder::new()
             .name("mission-supervisor-ipc".to_owned())
             .spawn(move || {
@@ -68,6 +135,7 @@ impl IpcServer {
                     secret_provider,
                     thread_stop,
                     idle_timeout,
+                    thread_dispatcher,
                 )
             })?;
 
@@ -125,6 +193,7 @@ fn run_server<P>(
     secret_provider: P,
     stop: Arc<AtomicBool>,
     idle_timeout: Duration,
+    dispatcher: Arc<dyn IpcDispatcher>,
 ) -> io::Result<()>
 where
     P: InstallSecretProvider + Send + 'static,
@@ -141,7 +210,13 @@ where
             break;
         }
 
-        (instance, verifier) = serve_with_idle_timeout(instance, verifier, &stop, idle_timeout)?;
+        (instance, verifier) = serve_with_idle_timeout(
+            instance,
+            verifier,
+            &stop,
+            idle_timeout,
+            Arc::clone(&dispatcher),
+        )?;
         instance.disconnect();
     }
 
@@ -153,12 +228,13 @@ fn serve_with_idle_timeout<P: InstallSecretProvider + Send + 'static>(
     mut verifier: HandshakeVerifier<P>,
     stop: &AtomicBool,
     idle_timeout: Duration,
+    dispatcher: Arc<dyn IpcDispatcher>,
 ) -> io::Result<(PipeInstance, HandshakeVerifier<P>)> {
     let (activity_tx, activity_rx) = mpsc::channel();
     let worker = thread::Builder::new()
         .name("mission-supervisor-ipc-connection".to_owned())
         .spawn(move || {
-            serve_connection(&mut instance.0, &mut verifier, &activity_tx);
+            serve_connection(&mut instance.0, &mut verifier, &activity_tx, dispatcher);
             unsafe {
                 FlushFileBuffers(instance.0.as_raw_handle().cast());
             }
@@ -200,6 +276,7 @@ fn serve_connection<P: InstallSecretProvider>(
     pipe: &mut File,
     verifier: &mut HandshakeVerifier<P>,
     activity: &mpsc::Sender<()>,
+    dispatcher: Arc<dyn IpcDispatcher>,
 ) {
     let mut authenticated_protocol = None;
     loop {
@@ -233,6 +310,7 @@ fn serve_connection<P: InstallSecretProvider>(
                 }
             }
             (Some(protocol_version), ClientMessage::Ping) => {
+                dispatcher.touch_ui();
                 let response = ServerMessage::Pong(Pong {
                     supervisor_version: env!("CARGO_PKG_VERSION").to_owned(),
                     protocol_version,
@@ -241,7 +319,26 @@ fn serve_connection<P: InstallSecretProvider>(
                     return;
                 }
             }
-            (None, ClientMessage::Ping) | (Some(_), ClientMessage::Handshake(_)) => {
+            (Some(_), ClientMessage::Command(command)) => {
+                dispatcher.touch_ui();
+                let response = match dispatcher.dispatch(&command.command, command.request) {
+                    Ok(result) => ServerMessage::Command(CommandResponse {
+                        command: command.command,
+                        result: Some(result),
+                        error: None,
+                    }),
+                    Err(error) => ServerMessage::Command(CommandResponse {
+                        command: command.command,
+                        result: None,
+                        error: Some(error),
+                    }),
+                };
+                if write_frame(pipe, &response).is_err() {
+                    return;
+                }
+            }
+            (None, ClientMessage::Ping | ClientMessage::Command(_))
+            | (Some(_), ClientMessage::Handshake(_)) => {
                 send_error(pipe, ProtocolErrorCode::AuthFailed);
                 return;
             }

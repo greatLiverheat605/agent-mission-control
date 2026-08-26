@@ -1,0 +1,113 @@
+.scene-fallback {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--mc-background);
+}
+
+.scene-fallback__plot {
+  position: relative;
+  display: grid;
+  min-height: 0;
+  place-items: center;
+  padding: var(--mc-space-6) var(--mc-space-4);
+}
+
+.scene-fallback svg {
+  width: 100%;
+  max-height: 100%;
+}
+
+.scene-fallback__spine,
+.scene-fallback__branch path {
+  fill: none;
+  stroke: var(--mc-status-info);
+  stroke-width: 2;
+  opacity: 0.6;
+}
+
+.scene-fallback__branch rect,
+.scene-fallback__node circle {
+  fill: var(--mc-background);
+  stroke: var(--mc-status-info);
+  stroke-width: 2;
+}
+
+.scene-fallback__branch[data-state="Abandoned"] path {
+  stroke: var(--mc-status-danger);
+  stroke-dasharray: 7 12;
+}
+
+.scene-fallback__branch[data-state="Abandoned"] rect {
+  stroke: var(--mc-status-danger);
+}
+
+.scene-fallback__branch[data-state="Blocked"] path,
+.scene-fallback__branch[data-state="Paused"] path,
+.scene-fallback__branch[data-state="Unknown"] path {
+  stroke: var(--mc-status-waiting);
+  stroke-dasharray: 7 7;
+}
+
+.scene-fallback__node[data-stage-state="complete"] circle {
+  fill: var(--mc-status-verified);
+  stroke: var(--mc-status-verified);
+}
+
+.scene-fallback__node[data-stage-state="current"] circle {
+  fill: var(--mc-status-info);
+  stroke: var(--mc-focus-ring);
+  stroke-width: 4;
+}
+
+.scene-fallback__node text {
+  fill: var(--mc-text-muted);
+  font-family: var(--mc-font-sans);
+  font-size: 15px;
+  letter-spacing: 0;
+}
+
+.scene-fallback__agent path {
+  fill: var(--mc-status-waiting);
+  stroke: var(--mc-background);
+  stroke-width: 3;
+}
+
+.scene-fallback__branches {
+  position: absolute;
+  right: var(--mc-space-4);
+  bottom: var(--mc-space-3);
+  display: grid;
+  gap: var(--mc-space-1);
+  color: var(--mc-text-muted);
+  font-family: var(--mc-font-mono);
+  font-size: 11px;
+}
+
+.scene-fallback__controls {
+  display: flex;
+  min-width: 0;
+  border-top: 1px solid var(--mc-border);
+  overflow-x: auto;
+}
+
+.scene-fallback__controls button {
+  min-width: max-content;
+  min-height: var(--mc-target-min);
+  border: 0;
+  border-right: 1px solid var(--mc-border);
+  padding: var(--mc-space-2) var(--mc-space-3);
+  color: var(--mc-text-muted);
+  background: var(--mc-surface);
+  font: inherit;
+  cursor: pointer;
+}
+
+.scene-fallback__controls button[aria-current="step"] {
+  color: var(--mc-text);
+  box-shadow: inset 0 2px var(--mc-status-info);
+}

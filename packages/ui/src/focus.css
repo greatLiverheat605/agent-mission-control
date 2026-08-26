@@ -1,0 +1,29 @@
+:where(button, a, input, textarea, select, [tabindex]):focus-visible {
+  outline: var(--mc-focus-width) solid var(--mc-focus-ring);
+  outline-offset: 3px;
+}
+
+:where(html) {
+  letter-spacing: 0;
+}
+
+:where(button, a, input, textarea, select, [role="button"]) {
+  min-height: var(--mc-target-min);
+  min-width: var(--mc-target-min);
+  letter-spacing: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+
+  [data-motion="state"] {
+    transition-duration: var(--mc-motion-fast) !important;
+  }
+}

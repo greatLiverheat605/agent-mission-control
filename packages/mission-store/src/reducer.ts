@@ -51,7 +51,7 @@ export function reduceMission(state: MissionStoreState, action: MissionAction): 
 function projectEvent(model: MissionReadModel, event: MissionEvent): MissionReadModel {
   const payload = event.payload;
   if (event.kind === "exploration_started" || event.kind === "agent_run_started") return { ...model, phase: "Exploring", status: "running", currentAction: "Inspecting project", reason: null };
-  if (event.kind === "pause_requested") return { ...model, phase: "Paused", status: "paused", currentAction: "Safe pause requested", reason: typeof payload.reason === "string" ? payload.reason : "Pause requested" };
+  if (event.kind === "pause_requested") return { ...model, phase: "Paused", status: "paused", currentAction: "Safe pause requested", reason: model.status === "paused" && model.reason ? model.reason : typeof payload.reason === "string" ? payload.reason : "Pause requested" };
   if (event.kind === "route_state_changed" && payload.state === "completed") return { ...model, phase: "Completed", status: "completed", currentAction: null };
   if (event.kind === "error" || event.kind === "adapter.protocol_error") return { ...model, status: "failed", currentAction: null, reason: typeof payload.error === "string" ? payload.error : "Adapter error" };
   return model;

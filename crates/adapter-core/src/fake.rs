@@ -21,6 +21,7 @@ impl Default for FakeAdapter {
         Self::new(vec![
             AgentEvent {
                 event_id: EventId::new(),
+                agent_run_id: None,
                 event_kind: EventKind::AgentRunStarted,
                 payload: json!({"phase":"started"}),
                 requires_safe_pause: false,
@@ -28,6 +29,7 @@ impl Default for FakeAdapter {
             },
             AgentEvent {
                 event_id: EventId::new(),
+                agent_run_id: None,
                 event_kind: EventKind::AgentMessage,
                 payload: json!({"phase":"analysis"}),
                 requires_safe_pause: false,
@@ -35,6 +37,7 @@ impl Default for FakeAdapter {
             },
             AgentEvent {
                 event_id: EventId::new(),
+                agent_run_id: None,
                 event_kind: EventKind::Unknown("tool.request".to_owned()),
                 payload: json!({"tool":"read_file"}),
                 requires_safe_pause: true,
@@ -42,6 +45,7 @@ impl Default for FakeAdapter {
             },
             AgentEvent {
                 event_id: EventId::new(),
+                agent_run_id: None,
                 event_kind: EventKind::EvidenceRecorded,
                 payload: json!({"evidence_id":"fake-tool-result","kind":"test","status":"verified","source":"agent"}),
                 requires_safe_pause: false,
@@ -49,6 +53,7 @@ impl Default for FakeAdapter {
             },
             AgentEvent {
                 event_id: EventId::new(),
+                agent_run_id: None,
                 event_kind: EventKind::AgentMessage,
                 payload: json!({"usage":{"input":10,"output":5}}),
                 requires_safe_pause: false,

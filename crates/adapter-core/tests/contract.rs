@@ -39,6 +39,7 @@ async fn fake_adapter_emits_ordered_events_and_exposes_capabilities() {
 fn event_envelope_keeps_raw_evidence_separate_from_normalized_payload() {
     let event = AgentEvent {
         event_id: mission_domain::EventId::new(),
+        agent_run_id: None,
         event_kind: EventKind::Unknown("native.unknown".to_owned()),
         payload: json!({"safe":"summary"}),
         requires_safe_pause: true,

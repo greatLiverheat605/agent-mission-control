@@ -11,8 +11,14 @@ pub use contract::{
     MissionContract, PatchActor, VersionConflict,
 };
 pub use event::{EventConfidence, EventEnvelope, EventKind, EventLinks, EventSource};
-pub use evidence::{Approval, EvidenceEntry, EvidenceKind, EvidenceMatrix};
+pub use evidence::{
+    Approval, CriterionEvidence, CriterionStatus, EvidenceEntry, EvidenceKind, EvidenceMatrix,
+    EvidenceMatrixError,
+};
 pub use ids::{EventId, MissionId, RouteId, Timestamp};
 pub use mission::Mission;
 pub use read_model::{ProjectionError, ReadModel, SequenceRange, reduce, replay};
-pub use route::{InvalidTransition, Route, RouteState, RouteTransitioned};
+pub use route::{
+    InvalidAbandonment, InvalidDerivation, InvalidTransition, Route, RouteAbandoned,
+    RouteAbandonment, RouteAcceptance, RouteState, RouteTransitioned,
+};

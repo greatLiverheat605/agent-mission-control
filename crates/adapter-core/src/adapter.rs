@@ -24,6 +24,8 @@ pub struct StartAgentRequest {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentEvent {
     pub event_id: EventId,
+    #[serde(default)]
+    pub agent_run_id: Option<String>,
     pub event_kind: EventKind,
     pub payload: Value,
     pub requires_safe_pause: bool,
@@ -45,7 +47,8 @@ impl AgentEvent {
             self.event_kind,
             self.payload,
         );
-        event.agent_run_id = None;
+        event.agent_run_id = self.agent_run_id;
+        event.raw_evidence = self.raw_evidence;
         event
     }
 }
@@ -67,6 +70,12 @@ pub enum AdapterError {
 }
 
 pub type EventSink = mpsc::UnboundedSender<AgentEvent>;
+
+#[derive(Clone, Debug)]
+pub enum AgentControl {
+    SafePause { reason: String },
+    Terminate,
+}
 
 #[async_trait]
 pub trait AgentAdapter: Send + Sync {
@@ -91,6 +100,7 @@ pub struct AgentHandle {
     run_id: String,
     control: Arc<Mutex<ControlState>>,
     events: Arc<Mutex<Option<mpsc::UnboundedReceiver<AgentEvent>>>>,
+    command_tx: Option<mpsc::UnboundedSender<AgentControl>>,
 }
 
 #[derive(Default)]
@@ -109,6 +119,20 @@ impl AgentHandle {
             run_id,
             control,
             events: Arc::new(Mutex::new(Some(events))),
+            command_tx: None,
+        }
+    }
+
+    pub fn with_control(
+        run_id: impl Into<String>,
+        events: mpsc::UnboundedReceiver<AgentEvent>,
+        command_tx: mpsc::UnboundedSender<AgentControl>,
+    ) -> Self {
+        Self {
+            run_id: run_id.into(),
+            control: Arc::new(Mutex::new(ControlState::default())),
+            events: Arc::new(Mutex::new(Some(events))),
+            command_tx: Some(command_tx),
         }
     }
 
@@ -133,6 +157,14 @@ impl AgentHandle {
     }
 
     pub async fn request_safe_pause(&self) -> Result<(), AdapterError> {
+        if let Some(command_tx) = &self.command_tx {
+            command_tx
+                .send(AgentControl::SafePause {
+                    reason: "handle request".to_owned(),
+                })
+                .map_err(|_| AdapterError::Unavailable("agent run ended".to_owned()))?;
+            return Ok(());
+        }
         let mut state = self.control.lock().await;
         if state.terminated {
             return Err(AdapterError::AlreadyTerminated);
@@ -145,6 +177,12 @@ impl AgentHandle {
     }
 
     pub async fn terminate_owned_tree(&self) -> Result<(), AdapterError> {
+        if let Some(command_tx) = &self.command_tx {
+            command_tx
+                .send(AgentControl::Terminate)
+                .map_err(|_| AdapterError::Unavailable("agent run ended".to_owned()))?;
+            return Ok(());
+        }
         let mut state = self.control.lock().await;
         if state.terminated {
             return Err(AdapterError::AlreadyTerminated);

@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS events (
     kind TEXT NOT NULL,
     occurred_at TEXT NOT NULL,
     payload TEXT NOT NULL,
+    raw_evidence TEXT,
     payload_hash TEXT NOT NULL,
     PRIMARY KEY (mission_id, sequence)
 );

@@ -21,13 +21,28 @@ pub fn production_pipe_name(sid: &str) -> String {
     format!("mission-control-{}", &digest[..16])
 }
 
-fn mutex_name(sid: &str) -> String {
-    format!("Global\\MissionControlSupervisor-{}", opaque_user_id(sid))
+fn mutex_name(sid: &str, scope: Option<&str>) -> String {
+    let user = opaque_user_id(sid);
+    match scope {
+        Some(scope) => format!(
+            "Global\\MissionControlSupervisor-{user}-{}",
+            &opaque_user_id(scope)[..16]
+        ),
+        None => format!("Global\\MissionControlSupervisor-{user}"),
+    }
 }
 
 impl SingleInstance {
     pub fn acquire(sid: &str) -> io::Result<AcquireResult> {
-        let name = mutex_name(sid);
+        Self::acquire_named(sid, mutex_name(sid, None))
+    }
+
+    #[cfg(any(debug_assertions, feature = "test-credential-target"))]
+    pub fn acquire_scoped(sid: &str, scope: &str) -> io::Result<AcquireResult> {
+        Self::acquire_named(sid, mutex_name(sid, Some(scope)))
+    }
+
+    fn acquire_named(sid: &str, name: String) -> io::Result<AcquireResult> {
         let wide_name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
         let security = SecurityAttributes::from_sddl(&user_system_admin_sddl(sid))?;
         let handle = unsafe { CreateMutexW(security.as_ptr(), 1, wide_name.as_ptr()) };
@@ -72,11 +87,26 @@ mod tests {
     fn mutex_name_is_a_global_stable_opaque_user_identity() {
         let sid = "S-1-5-21-111-222-333-1001";
 
-        let first = mutex_name(sid);
-        let second = mutex_name(sid);
+        let first = mutex_name(sid, None);
+        let second = mutex_name(sid, None);
 
         assert_eq!(first, second);
         assert!(first.starts_with("Global\\MissionControlSupervisor-"));
         assert!(!first.contains(sid));
+    }
+
+    #[test]
+    fn scoped_mutex_names_are_stable_isolated_and_opaque() {
+        let sid = "S-1-5-21-111-222-333-1001";
+
+        let first = mutex_name(sid, Some("e2e-profile-a"));
+        let repeated = mutex_name(sid, Some("e2e-profile-a"));
+        let second = mutex_name(sid, Some("e2e-profile-b"));
+
+        assert_eq!(first, repeated);
+        assert_ne!(first, second);
+        assert_ne!(first, mutex_name(sid, None));
+        assert!(!first.contains(sid));
+        assert!(!first.contains("e2e-profile-a"));
     }
 }

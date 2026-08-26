@@ -66,6 +66,31 @@ fn append_is_idempotent_and_sequence_is_monotonic() {
 }
 
 #[test]
+fn mission_ids_are_recoverable_for_service_rehydration() {
+    let path = std::env::temp_dir().join(format!(
+        "mission-ledger-missions-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let store = InMemoryKeyStore::default();
+    let first_mission = MissionId::new();
+    let second_mission = MissionId::new();
+    let mut ledger = EncryptedLedger::open(&path, "install", store).expect("open ledger");
+    let mut first = event(1, json!({}));
+    first.mission_id = first_mission;
+    ledger.append(&first).expect("append first");
+    let mut second = event(1, json!({}));
+    second.mission_id = second_mission;
+    ledger.append(&second).expect("append second");
+
+    let missions = ledger.mission_ids().expect("list mission ids");
+    assert_eq!(missions.len(), 2);
+    assert!(missions.contains(&first_mission));
+    assert!(missions.contains(&second_mission));
+    drop(ledger);
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn duplicate_event_id_with_changed_envelope_is_rejected() {
     let path = std::env::temp_dir().join(format!("mission-ledger-{}.db", uuid::Uuid::new_v4()));
     let store = InMemoryKeyStore::default();
@@ -128,6 +153,35 @@ fn replayed_redacted_event_keeps_a_valid_persisted_hash() {
             .to_string()
             .contains("sk-1234567890abcdefghijklmnop")
     );
+    drop(ledger);
+    fs::remove_dir_all(root).expect("remove temp root");
+}
+
+#[test]
+fn replayed_raw_evidence_is_redacted_before_persistence() {
+    let root = std::env::temp_dir().join(format!(
+        "mission-ledger-raw-evidence-{}",
+        uuid::Uuid::new_v4()
+    ));
+    fs::create_dir_all(&root).expect("create temp root");
+    let path = root.join("ledger.db");
+    let store = InMemoryKeyStore::default();
+    let mission = MissionId::new();
+    let secret = "sk-1234567890abcdefghijklmnop";
+    let mut ledger = EncryptedLedger::open(&path, "install", store).expect("open ledger");
+    let mut item = event(1, json!({"message": "observed"}));
+    item.mission_id = mission;
+    item.raw_evidence = Some(json!({"stdout": format!("token={secret}")}));
+
+    ledger.append(&item).expect("append event");
+    let replayed = ledger.replay_events(&mission).expect("replay events");
+    let evidence = replayed[0]
+        .raw_evidence
+        .as_ref()
+        .expect("raw evidence is retained");
+    assert!(!evidence.to_string().contains(secret));
+    assert!(evidence.to_string().contains("[REDACTED:openai_key:"));
+
     drop(ledger);
     fs::remove_dir_all(root).expect("remove temp root");
 }

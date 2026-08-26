@@ -6,6 +6,7 @@ use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use hkdf::Hkdf;
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -14,7 +15,7 @@ const VERSION: u8 = 1;
 const NONCE_LEN: usize = 12;
 const HEADER_LEN: usize = 8 + 1 + NONCE_LEN + 8;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BlobRef {
     pub hash: String,
     pub size: u64,

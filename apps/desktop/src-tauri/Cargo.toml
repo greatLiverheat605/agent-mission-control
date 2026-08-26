@@ -8,12 +8,21 @@ name = "mission-control-desktop"
 path = "src/main.rs"
 
 [dependencies]
+adapter-codex = { path = "../../../crates/adapter-codex" }
+adapter-core = { path = "../../../crates/adapter-core" }
 mission-protocol = { path = "../../../crates/protocol" }
 mission-supervisor = { path = "../../../crates/supervisor" }
+mission-domain = { path = "../../../crates/domain" }
+mission-ledger = { path = "../../../crates/ledger" }
 serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
 tauri = { version = "2.11.5", features = [] }
 windows-sys.workspace = true
 
 [build-dependencies]
 serde_json.workspace = true
 tauri-build = { version = "2.6.3", features = [] }
+
+[dev-dependencies]
+tempfile = "3.23"

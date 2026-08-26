@@ -90,7 +90,18 @@ pub fn reduce(current: &ReadModel, event: &EventEnvelope) -> Result<ReadModel, P
             next.compatibility_warnings
                 .push("agent message cannot verify evidence".to_owned());
         }
-        EventKind::ExplorationStarted | EventKind::AgentRunStarted | EventKind::PauseRequested => {}
+        EventKind::ExplorationStarted
+        | EventKind::AgentRunStarted
+        | EventKind::ApprovalRequested
+        | EventKind::ApprovalResolved
+        | EventKind::ApprovalRevoked
+        | EventKind::ApprovalExpired
+        | EventKind::ApprovalConsumed
+        | EventKind::BudgetWarning
+        | EventKind::BudgetApprovalRequired
+        | EventKind::BudgetExceeded
+        | EventKind::FlightEnvelopeChanged
+        | EventKind::PauseRequested => {}
     }
     Ok(next)
 }

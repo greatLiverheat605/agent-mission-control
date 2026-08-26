@@ -45,6 +45,7 @@ impl CodexNormalizer {
                 confidence: "observed".to_owned(),
                 event: AgentEvent {
                     event_id: EventId::new(),
+                    agent_run_id: None,
                     event_kind: EventKind::Unknown("adapter.protocol_warning".to_owned()),
                     payload: json!({"error": error.to_string(), "raw_line": line}),
                     requires_safe_pause: true,
@@ -90,6 +91,7 @@ fn normalize_with_version(native: NativeEvent, adapter_version: &str) -> Normali
         confidence: "observed".to_owned(),
         event: AgentEvent {
             event_id: EventId::new(),
+            agent_run_id: None,
             event_kind: kind,
             payload,
             requires_safe_pause,

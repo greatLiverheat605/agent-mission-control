@@ -38,10 +38,24 @@ pub struct Pong {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CommandRequest {
+    pub command: String,
+    pub request: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CommandResponse {
+    pub command: String,
+    pub result: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", content = "payload")]
 pub enum ClientMessage {
     Handshake(Handshake),
     Ping,
+    Command(CommandRequest),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -49,6 +63,7 @@ pub enum ClientMessage {
 pub enum ServerMessage {
     HandshakeAccepted(HandshakeAccepted),
     Pong(Pong),
+    Command(CommandResponse),
     Error(ProtocolError),
 }
 

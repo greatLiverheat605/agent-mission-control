@@ -1,21 +1,81 @@
 use std::collections::BTreeSet;
 use std::io;
-use std::process::{Child, Command};
+use std::process::Child;
+
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+#[cfg(windows)]
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, TerminateJobObject,
+};
 
 #[derive(Debug, Default)]
 pub struct OwnedProcessTree {
     root_pid: Option<u32>,
     pids: BTreeSet<u32>,
+    #[cfg(windows)]
+    job: Option<HANDLE>,
 }
+
+// Job handles are kernel objects with no thread affinity. Ownership is guarded by the
+// MissionService mutex, so transferring the owning actor between command workers is safe.
+unsafe impl Send for OwnedProcessTree {}
+unsafe impl Sync for OwnedProcessTree {}
 
 impl OwnedProcessTree {
     pub fn new() -> Self {
-        Self::default()
+        #[cfg(windows)]
+        {
+            let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            let job = (!job.is_null()).then_some(job);
+            if let Some(job_handle) = job {
+                let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+                limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                let configured = unsafe {
+                    SetInformationJobObject(
+                        job_handle,
+                        JobObjectExtendedLimitInformation,
+                        (&mut limits as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                        std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                    )
+                } != 0;
+                if !configured {
+                    unsafe { CloseHandle(job_handle) };
+                    return Self {
+                        root_pid: None,
+                        pids: BTreeSet::new(),
+                        job: None,
+                    };
+                }
+            }
+            Self {
+                root_pid: None,
+                pids: BTreeSet::new(),
+                job,
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            Self::default()
+        }
     }
 
     pub fn from_child(child: &Child) -> Self {
         let mut tree = Self::new();
         tree.register(child.id());
+        #[cfg(windows)]
+        if let Some(job) = tree.job {
+            let assigned =
+                unsafe { AssignProcessToJobObject(job, child.as_raw_handle().cast()) } != 0;
+            if !assigned {
+                tree.job = None;
+                unsafe { CloseHandle(job) };
+            }
+        }
         tree
     }
 
@@ -39,22 +99,28 @@ impl OwnedProcessTree {
     }
 
     pub fn terminate(&mut self) -> io::Result<()> {
-        let Some(root) = self.root_pid else {
+        let Some(_root) = self.root_pid else {
             return Ok(());
         };
         #[cfg(windows)]
-        {
-            let status = Command::new("taskkill")
-                .args(["/PID", &root.to_string(), "/T", "/F"])
-                .status()?;
-            if !status.success() {
-                return Err(io::Error::other(format!("taskkill exited with {status}")));
+        if let Some(job) = self.job {
+            if unsafe { TerminateJobObject(job, 1) } == 0 {
+                return Err(io::Error::last_os_error());
             }
+        } else {
+            return Err(io::Error::other("owned process job object is unavailable"));
         }
-        #[cfg(not(windows))]
-        let _ = root;
         self.pids.clear();
         Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for OwnedProcessTree {
+    fn drop(&mut self) {
+        if let Some(job) = self.job.take() {
+            unsafe { CloseHandle(job) };
+        }
     }
 }
 

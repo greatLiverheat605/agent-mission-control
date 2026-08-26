@@ -1,0 +1,74 @@
+.visual-performance {
+  position: relative;
+  display: grid;
+  gap: var(--mc-space-1);
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+  color: var(--mc-text-muted);
+}
+
+.visual-performance legend,
+.visual-performance output {
+  padding: 0;
+  font-family: var(--mc-font-mono);
+  font-size: 11px;
+  letter-spacing: 0;
+}
+
+.visual-performance__segments {
+  display: flex;
+  border: 1px solid var(--mc-border);
+  border-radius: var(--mc-radius-item);
+  background: var(--mc-surface);
+}
+
+.visual-performance label {
+  position: relative;
+  flex: 1 1 68px;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.visual-performance input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.visual-performance span {
+  display: grid;
+  min-width: var(--mc-target-min);
+  min-height: var(--mc-target-min);
+  place-items: center;
+  border-right: 1px solid var(--mc-border);
+  padding: var(--mc-space-2);
+  font-size: var(--mc-text-body);
+}
+
+.visual-performance label:last-child span {
+  border-right: 0;
+}
+
+.visual-performance input:checked + span {
+  color: var(--mc-text);
+  background: var(--mc-surface-raised);
+  box-shadow: inset 0 -2px var(--mc-status-info);
+}
+
+.visual-performance input:focus-visible + span {
+  outline: var(--mc-focus-width) solid var(--mc-focus-ring);
+  outline-offset: -3px;
+}
+
+@media (max-width: 1120px) {
+  .visual-performance__segments {
+    flex-wrap: wrap;
+  }
+
+  .visual-performance label {
+    flex-basis: 96px;
+  }
+}

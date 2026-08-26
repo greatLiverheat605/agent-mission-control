@@ -1,0 +1,80 @@
+@import "@fontsource-variable/ibm-plex-sans";
+@import "@fontsource/ibm-plex-mono";
+
+:root {
+  color-scheme: dark;
+
+  --mc-void: #04060a;
+  --mc-background: #080b10;
+  --mc-surface: #0d1117;
+  --mc-surface-raised: #11161d;
+  --mc-surface-command: #161d26;
+  --mc-surface-highlight: #1d2530;
+  --mc-text: #c3cedb;
+  --mc-text-strong: #e8eef4;
+  --mc-text-muted: #98a5b4;
+  --mc-text-faint: #76828f;
+  --mc-border: #232c38;
+  --mc-border-strong: #39434f;
+  --mc-hull-highlight: #ffffff0b;
+  --mc-shadow: #00000099;
+
+  --mc-nav: #57d8e8;
+  --mc-nav-muted: #2c8ba0;
+  --mc-nav-surface: #12333c;
+  --mc-caution: #f5a742;
+  --mc-caution-surface: #3a2a12;
+  --mc-danger: #ff5063;
+  --mc-danger-surface: #38161c;
+  --mc-verified: #3fd487;
+  --mc-verified-surface: #0f2b21;
+  --mc-offline: #7b8794;
+  --mc-offline-surface: #202832;
+
+  --mc-status-info: var(--mc-nav);
+  --mc-status-verified: var(--mc-verified);
+  --mc-status-waiting: var(--mc-caution);
+  --mc-status-danger: var(--mc-danger);
+  --mc-status-unknown: var(--mc-offline);
+  --mc-status-offline: var(--mc-offline);
+  --mc-status-degraded: var(--mc-caution);
+  --mc-focus-ring: #8be8f0;
+
+  --mc-space-1: 4px;
+  --mc-space-2: 8px;
+  --mc-space-3: 12px;
+  --mc-space-4: 16px;
+  --mc-space-5: 24px;
+  --mc-space-6: 32px;
+  --mc-space-7: 48px;
+  --mc-target-min: 44px;
+  --mc-radius-item: 2px;
+  --mc-focus-width: 2px;
+  --mc-line-hairline: 1px;
+  --mc-bezel-depth: 8px;
+  --mc-drawer-rail: 44px;
+  --mc-beam-height: 64px;
+  --mc-helm-height: 172px;
+  --mc-viewport-min-block: 320px;
+  --mc-cockpit-max-inline: 2560px;
+
+  --mc-text-body: 14px;
+  --mc-text-command: 14px;
+  --mc-text-telemetry: 11px;
+  --mc-leading-body: 1.5;
+  --mc-leading-compact: 1.3;
+  --mc-font-sans: "IBM Plex Sans Variable", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --mc-font-mono: "IBM Plex Mono", "Cascadia Mono", Consolas, monospace;
+
+  --mc-motion-fast: 120ms;
+  --mc-motion-standard: 200ms;
+  --mc-motion-slow: 400ms;
+  --mc-ease-command: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  --mc-z-scene: 0;
+  --mc-z-hud: 3;
+  --mc-z-dock: 9;
+  --mc-z-drawer: 40;
+  --mc-z-command: 60;
+  --mc-z-emergency: 80;
+}

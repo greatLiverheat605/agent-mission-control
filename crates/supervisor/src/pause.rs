@@ -1,3 +1,4 @@
+use mission_domain::EventEnvelope;
 use std::fmt;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -53,6 +54,28 @@ impl Default for PauseController {
 }
 
 impl PauseController {
+    pub fn from_events(events: &[EventEnvelope]) -> Self {
+        let mut controller = Self::default();
+        for event in events {
+            match event.kind.as_str() {
+                "pause_requested" => {
+                    let reason = event
+                        .payload
+                        .get("reason")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("pause requested")
+                        .to_owned();
+                    controller.state = PauseState::PauseRequested { reason };
+                }
+                "pause_acknowledged" => controller.state = PauseState::PauseAcknowledged,
+                "pause_timed_out" => controller.state = PauseState::PauseTimedOut,
+                "force_terminated" => controller.state = PauseState::Terminated,
+                _ => {}
+            }
+        }
+        controller
+    }
+
     pub fn state(&self) -> &PauseState {
         &self.state
     }
@@ -125,6 +148,13 @@ impl PauseController {
             to: self.state.clone(),
             confirmation_token: None,
         })
+    }
+
+    pub fn can_force_terminate(&self, token: &str) -> bool {
+        matches!(
+            &self.state,
+            PauseState::ForceTerminationAvailable { confirmation_token } if confirmation_token == token
+        )
     }
 }
 

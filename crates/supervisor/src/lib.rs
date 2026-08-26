@@ -4,9 +4,13 @@ pub mod event_pipeline;
 pub mod ipc;
 pub mod mission_actor;
 #[cfg(windows)]
+pub mod mission_service;
+#[cfg(windows)]
 pub mod package_smoke;
 pub mod pause;
 pub mod process_tree;
+pub mod resource_budget;
+pub mod scheduler;
 pub mod single_instance;
 
 use std::ffi::OsString;
@@ -69,6 +73,8 @@ struct Config {
     data_dir: PathBuf,
     parent_pid: Option<u32>,
     #[cfg(any(debug_assertions, feature = "test-credential-target"))]
+    instance_scope: Option<String>,
+    #[cfg(any(debug_assertions, feature = "test-credential-target"))]
     credential_target: Option<String>,
 }
 
@@ -77,6 +83,8 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Config, RunErr
     let mut pipe_name = None;
     let mut data_dir = None;
     let mut parent_pid = None;
+    #[cfg(any(debug_assertions, feature = "test-credential-target"))]
+    let mut instance_scope = None;
     #[cfg(any(debug_assertions, feature = "test-credential-target"))]
     let mut credential_target = None;
 
@@ -114,6 +122,15 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Config, RunErr
                 }
             }
             #[cfg(any(debug_assertions, feature = "test-credential-target"))]
+            Some("--instance-scope") => {
+                instance_scope = Some(
+                    args.next()
+                        .and_then(|value| value.into_string().ok())
+                        .filter(|value| !value.is_empty() && !value.contains('\0'))
+                        .ok_or_else(invalid)?,
+                );
+            }
+            #[cfg(any(debug_assertions, feature = "test-credential-target"))]
             Some("--credential-target") => {
                 credential_target = Some(
                     args.next()
@@ -130,6 +147,8 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Config, RunErr
         pipe_name,
         data_dir: data_dir.ok_or_else(invalid)?,
         parent_pid,
+        #[cfg(any(debug_assertions, feature = "test-credential-target"))]
+        instance_scope,
         #[cfg(any(debug_assertions, feature = "test-credential-target"))]
         credential_target,
     })
@@ -280,11 +299,18 @@ impl Drop for ReadyFile {
 pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), RunError> {
     let config = parse_args(args)?;
     let sid = current_user_sid()?;
-    let pipe_name = resolve_pipe_name(config.pipe_name, &sid);
-    let _instance = match SingleInstance::acquire(&sid)? {
+    #[cfg(any(debug_assertions, feature = "test-credential-target"))]
+    let acquired = match config.instance_scope.as_deref() {
+        Some(scope) => SingleInstance::acquire_scoped(&sid, scope)?,
+        None => SingleInstance::acquire(&sid)?,
+    };
+    #[cfg(not(any(debug_assertions, feature = "test-credential-target")))]
+    let acquired = SingleInstance::acquire(&sid)?;
+    let _instance = match acquired {
         AcquireResult::Acquired(instance) => instance,
         AcquireResult::AlreadyRunning => return Err(RunError::AlreadyRunning),
     };
+    let pipe_name = resolve_pipe_name(config.pipe_name, &sid);
     let _console_handler = ConsoleHandler::install()?;
     let parent = config.parent_pid.map(ParentProcess::open).transpose()?;
 
@@ -298,7 +324,14 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), RunError> {
         .unwrap_or_default();
     #[cfg(not(any(debug_assertions, feature = "test-credential-target")))]
     let secret_provider = WindowsCredentialInstallSecret::default();
-    let ipc_server = IpcServer::spawn(&pipe_name, PRODUCT_INSTALL_ID, secret_provider)?;
+    let mission_service = mission_service::MissionService::new(config.data_dir.clone())
+        .map_err(|error| io::Error::other(format!("mission service: {error}")))?;
+    let ipc_server = IpcServer::spawn_with_dispatcher(
+        &pipe_name,
+        PRODUCT_INSTALL_ID,
+        secret_provider,
+        mission_service,
+    )?;
     let ready_file = ReadyFile::publish(&config.data_dir, pid, &pipe_name)?;
     let mut stdout = io::stdout().lock();
     serde_json::to_writer(
@@ -461,17 +494,22 @@ mod tests {
 
     #[cfg(all(not(debug_assertions), not(feature = "test-credential-target")))]
     #[test]
-    fn release_parser_rejects_credential_target() {
-        let result = super::parse_args(
-            [
-                "--data-dir",
-                r"C:\ProgramData\Agent Mission Control",
-                "--credential-target",
-                "test-target",
-            ]
-            .map(Into::into),
-        );
+    fn release_parser_rejects_test_only_switches() {
+        for (argument, value) in [
+            ("--credential-target", "test-target"),
+            ("--instance-scope", "e2e-profile"),
+        ] {
+            let result = super::parse_args(
+                [
+                    "--data-dir",
+                    r"C:\ProgramData\Agent Mission Control",
+                    argument,
+                    value,
+                ]
+                .map(Into::into),
+            );
 
-        assert!(matches!(result, Err(super::RunError::InvalidArguments)));
+            assert!(matches!(result, Err(super::RunError::InvalidArguments)));
+        }
     }
 }

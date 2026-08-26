@@ -10,8 +10,8 @@ use std::time::Duration;
 use mission_protocol::credential::{WindowsCredentialInstallSecret, secure_random};
 use mission_protocol::frame::{read_frame, write_frame};
 use mission_protocol::handshake::{
-    ClientMessage, Handshake, InstallSecretProvider, NONCE_BYTES, PRODUCT_INSTALL_ID,
-    PROTOCOL_VERSION, ProtocolErrorCode, ServerMessage, handshake_proof,
+    ClientMessage, CommandRequest, Handshake, InstallSecretProvider, NONCE_BYTES,
+    PRODUCT_INSTALL_ID, PROTOCOL_VERSION, ProtocolErrorCode, ServerMessage, handshake_proof,
 };
 use mission_supervisor::single_instance::{current_user_sid, production_pipe_name};
 use serde::Serialize;
@@ -57,54 +57,8 @@ pub(crate) use mission_commands;
 #[allow(dead_code)]
 pub const MISSION_ALLOWED_COMMANDS: [&str; 6] = mission_commands!(command_names);
 
-#[allow(dead_code)]
-#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MissionCommandRequest {
-    pub mission_id: Option<String>,
-    pub route_id: Option<String>,
-    pub expected_version: Option<u64>,
-    pub project_root: Option<String>,
-    pub goal: Option<String>,
-    pub reason: Option<String>,
-    pub confirmation_token: Option<String>,
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MissionCommandResult {
-    pub accepted: bool,
-    pub mission_id: Option<String>,
-    pub sequence: Option<u64>,
-    pub error_code: Option<&'static str>,
-}
-
-#[allow(dead_code)]
-pub fn validate_mission_request(request: &MissionCommandRequest) -> Result<(), &'static str> {
-    if request
-        .project_root
-        .as_ref()
-        .is_some_and(|value| value.len() > 4096)
-    {
-        return Err("PROJECT_ROOT_TOO_LONG");
-    }
-    if request
-        .goal
-        .as_ref()
-        .is_some_and(|value| value.len() > 32_000)
-    {
-        return Err("GOAL_TOO_LONG");
-    }
-    if request
-        .confirmation_token
-        .as_ref()
-        .is_some_and(|value| value.len() > 256)
-    {
-        return Err("CONFIRMATION_TOKEN_TOO_LONG");
-    }
-    Ok(())
-}
+#[allow(unused_imports)]
+pub use mission_supervisor::mission_service::{MissionCommandRequest, MissionCommandResult};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BridgeError {
@@ -125,17 +79,28 @@ pub struct PublicSupervisorStatus {
 pub trait SupervisorTransport {
     fn ping(&mut self) -> Result<String, BridgeError>;
 
+    #[allow(dead_code)]
+    fn command(
+        &mut self,
+        _command: &str,
+        _request: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        Err("SUPERVISOR_UNAVAILABLE".to_owned())
+    }
+
     fn start_packaged(&mut self) -> Result<(), BridgeError> {
         Err(BridgeError::Unavailable)
     }
 }
 
 pub struct LocalSupervisorTransport<P = WindowsCredentialInstallSecret> {
+    pipe_name: String,
     pipe_path: String,
     secret_provider: P,
     session: Option<File>,
     supervisor_path: Option<PathBuf>,
     data_dir: Option<PathBuf>,
+    instance_scope: Option<String>,
     child: Option<Child>,
 }
 
@@ -149,13 +114,27 @@ impl LocalSupervisorTransport<WindowsCredentialInstallSecret> {
                 "desktop install directory is missing",
             )
         })?;
+        #[cfg(debug_assertions)]
+        let pipe_name = std::env::var("MISSION_PIPE_NAME")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or(production_pipe_name(&current_user_sid()?));
+        #[cfg(not(debug_assertions))]
         let pipe_name = production_pipe_name(&current_user_sid()?);
+        #[cfg(debug_assertions)]
+        let instance_scope = std::env::var("MISSION_INSTANCE_SCOPE")
+            .ok()
+            .filter(|value| !value.is_empty());
+        #[cfg(not(debug_assertions))]
+        let instance_scope = None;
         Ok(Self {
+            pipe_name: pipe_name.clone(),
             pipe_path: format!(r"\\.\pipe\{pipe_name}"),
             secret_provider: WindowsCredentialInstallSecret::default(),
             session: None,
             supervisor_path: Some(install_dir.join("mission-control-supervisor.exe")),
             data_dir: Some(data_dir),
+            instance_scope,
             child: None,
         })
     }
@@ -166,11 +145,13 @@ impl<P> LocalSupervisorTransport<P> {
     #[allow(dead_code)]
     pub fn for_test(pipe_name: &str, secret_provider: P) -> Self {
         Self {
+            pipe_name: pipe_name.to_owned(),
             pipe_path: format!(r"\\.\pipe\{pipe_name}"),
             secret_provider,
             session: None,
             supervisor_path: None,
             data_dir: None,
+            instance_scope: None,
             child: None,
         }
     }
@@ -204,19 +185,71 @@ impl<P: InstallSecretProvider> SupervisorTransport for LocalSupervisorTransport<
             .filter(|path| path.is_file())
             .ok_or(BridgeError::Unavailable)?;
         let data_dir = self.data_dir.as_ref().ok_or(BridgeError::Unavailable)?;
-        let child = packaged_supervisor_command(supervisor_path, data_dir)
-            .spawn()
-            .map_err(|_| BridgeError::Unavailable)?;
+        let child = packaged_supervisor_command(
+            supervisor_path,
+            data_dir,
+            &self.pipe_name,
+            self.instance_scope.as_deref(),
+        )
+        .spawn()
+        .map_err(|_| BridgeError::Unavailable)?;
         self.child = Some(child);
         Ok(())
     }
+
+    fn command(
+        &mut self,
+        command: &str,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        if self.session.is_none() {
+            self.session = Some(
+                self.connect_and_authenticate()
+                    .map_err(|_| "SUPERVISOR_UNAVAILABLE".to_owned())?,
+            );
+        }
+        let pipe = self.session.as_mut().expect("session was established");
+        let message = ClientMessage::Command(CommandRequest {
+            command: command.to_owned(),
+            request,
+        });
+        let result = with_io_deadline(CLIENT_IO_TIMEOUT, || {
+            write_frame(&mut *pipe, &message).map_err(|_| BridgeError::Unavailable)?;
+            read_frame(pipe).map_err(|_| BridgeError::Unavailable)
+        });
+        match result {
+            Ok(ServerMessage::Command(response)) if response.command == command => {
+                response.result.ok_or_else(|| {
+                    response
+                        .error
+                        .unwrap_or_else(|| "SUPERVISOR_COMMAND_FAILED".to_owned())
+                })
+            }
+            Ok(_) => Err("SUPERVISOR_PROTOCOL_ERROR".to_owned()),
+            Err(_) => {
+                self.session = None;
+                Err("SUPERVISOR_UNAVAILABLE".to_owned())
+            }
+        }
+    }
 }
 
-pub(crate) fn packaged_supervisor_command(supervisor_path: &Path, data_dir: &Path) -> Command {
+pub(crate) fn packaged_supervisor_command(
+    supervisor_path: &Path,
+    data_dir: &Path,
+    pipe_name: &str,
+    instance_scope: Option<&str>,
+) -> Command {
     let mut command = Command::new(supervisor_path);
     command
         .arg("--data-dir")
         .arg(data_dir)
+        .arg("--pipe-name")
+        .arg(pipe_name);
+    if let Some(instance_scope) = instance_scope {
+        command.arg("--instance-scope").arg(instance_scope);
+    }
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -411,6 +444,22 @@ impl<T: SupervisorTransport> SupervisorBridge<T> {
             .ping();
         public_status(result)
     }
+
+    #[allow(dead_code)]
+    pub fn dispatch_mission(
+        &self,
+        command: &str,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        if !MISSION_ALLOWED_COMMANDS.contains(&command) {
+            return Err("COMMAND_NOT_ALLOWED".to_owned());
+        }
+        self.inner
+            .lock()
+            .map_err(|_| "SUPERVISOR_BRIDGE_POISONED".to_owned())?
+            .transport
+            .command(command, request)
+    }
 }
 
 impl<T: SupervisorTransport + Send + 'static> SupervisorBridge<T> {
@@ -424,6 +473,17 @@ impl<T: SupervisorTransport + Send + 'static> SupervisorBridge<T> {
         tauri::async_runtime::spawn_blocking(move || self.ping_supervisor())
             .await
             .expect("supervisor ping worker panicked")
+    }
+
+    #[allow(dead_code)]
+    pub async fn dispatch_mission_async(
+        self: Arc<Self>,
+        command: &'static str,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        tauri::async_runtime::spawn_blocking(move || self.dispatch_mission(command, request))
+            .await
+            .map_err(|_| "SUPERVISOR_COMMAND_WORKER_FAILED".to_owned())?
     }
 }
 

@@ -15,8 +15,8 @@
         "title": "Agent Mission Control",
         "width": 1180,
         "height": 680,
-        "minWidth": 1180,
-        "minHeight": 680,
+        "minWidth": 1024,
+        "minHeight": 640,
         "fullscreen": true,
         "resizable": true,
         "decorations": true

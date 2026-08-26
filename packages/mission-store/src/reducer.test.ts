@@ -17,4 +17,13 @@ describe("mission read model", () => {
     state = reduceMission(state, { type: "event", event: event(1) });
     expect(state.m1.events).toHaveLength(1);
   });
+
+  test("keeps the causal reason when an agent echoes a pause request", () => {
+    let state: MissionStoreState = { m1: emptyMission("m1") };
+    state = reduceMission(state, { type: "event", event: { ...event(1, "pause_requested"), payload: { reason: "ui disconnected" } } });
+    state = reduceMission(state, { type: "event", event: { ...event(2, "pause_requested"), payload: { reason: "safe pause requested" } } });
+
+    expect(state.m1.reason).toBe("ui disconnected");
+    expect(state.m1.lastSequence).toBe(2);
+  });
 });

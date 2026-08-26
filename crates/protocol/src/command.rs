@@ -23,6 +23,27 @@ pub enum Actor {
     Agent,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecision {
+    Approve,
+    Deny,
+    Revoke,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ResolveApproval {
+    pub approval_id: String,
+    pub expected_revision: u64,
+    pub decision: ApprovalDecision,
+    pub mission_id: String,
+    pub route_id: String,
+    pub contract_version: u64,
+    pub loadout_fingerprint: String,
+    pub action_digest: String,
+    pub now_ms: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RequestEnvelope {
     pub request_id: String,

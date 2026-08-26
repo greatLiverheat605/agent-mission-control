@@ -1994,12 +1994,18 @@ dependencies = [
 name = "mission-control-desktop"
 version = "0.1.0"
 dependencies = [
+ "adapter-codex",
+ "adapter-core",
+ "mission-domain",
+ "mission-ledger",
  "mission-protocol",
  "mission-supervisor",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
+ "tempfile",
+ "tokio",
  "windows-sys 0.61.2",
 ]
 
@@ -2033,6 +2039,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mission-policy"
+version = "0.1.0"
+dependencies = [
+ "mission-domain",
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "mission-protocol"
 version = "0.1.0"
 dependencies = [
@@ -2048,13 +2063,31 @@ dependencies = [
 name = "mission-supervisor"
 version = "0.1.0"
 dependencies = [
+ "adapter-codex",
  "adapter-core",
  "mission-domain",
  "mission-ledger",
+ "mission-policy",
  "mission-protocol",
+ "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
+ "tokio",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mission-workspace"
+version = "0.1.0"
+dependencies = [
+ "mission-domain",
+ "mission-ledger",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

@@ -94,6 +94,7 @@ impl EncryptedLedger {
                 LedgerError::MigrationFailedReadOnly
             });
         }
+        ensure_raw_evidence_column(&connection)?;
         let sentinel: Option<String> = connection
             .query_row(
                 "SELECT value FROM ledger_meta WHERE key = 'schema_sentinel'",
@@ -122,6 +123,16 @@ impl EncryptedLedger {
         let payload = serde_json::to_string(&redacted.value)
             .map_err(|error| LedgerError::InvalidPayload(error.to_string()))?;
         let persisted_payload_hash = persisted_payload_hash(&redacted.value);
+        let persisted_raw_evidence = event
+            .raw_evidence
+            .as_ref()
+            .map(|value| self.redactor.redact_event(value.clone()))
+            .transpose()?
+            .map(|redacted| {
+                serde_json::to_string(&redacted.value)
+                    .map_err(|error| LedgerError::InvalidPayload(error.to_string()))
+            })
+            .transpose()?;
         let tx = self.connection.transaction()?;
         let last: Option<i64> = tx
             .query_row(
@@ -132,17 +143,18 @@ impl EncryptedLedger {
             .optional()?;
         if let Some(existing) = tx
             .query_row(
-                "SELECT mission_id, sequence, payload_hash, schema_version, route_id, kind, occurred_at FROM events WHERE event_id = ?1",
+                "SELECT mission_id, sequence, payload_hash, raw_evidence, schema_version, route_id, kind, occurred_at FROM events WHERE event_id = ?1",
                 [event.event_id.to_string()],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, i64>(1)?,
                         row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, i64>(4)?,
                         row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
                     ))
                 },
             )
@@ -151,10 +163,11 @@ impl EncryptedLedger {
             return if existing.0 == event.mission_id.to_string()
                 && existing.1 == sequence
                 && existing.2 == persisted_payload_hash
-                && existing.3 == i64::from(event.schema_version)
-                && existing.4 == event.route_id.to_string()
-                && existing.5 == event.kind.as_str()
-                && existing.6 == event.occurred_at.as_str()
+                && existing.3 == persisted_raw_evidence
+                && existing.4 == i64::from(event.schema_version)
+                && existing.5 == event.route_id.to_string()
+                && existing.6 == event.kind.as_str()
+                && existing.7 == event.occurred_at.as_str()
             {
                 Ok(())
             } else {
@@ -165,8 +178,8 @@ impl EncryptedLedger {
             return Err(LedgerError::SequenceViolation);
         }
         tx.execute(
-            "INSERT INTO events(mission_id, route_id, sequence, event_id, schema_version, kind, occurred_at, payload, payload_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![event.mission_id.to_string(), event.route_id.to_string(), sequence, event.event_id.to_string(), event.schema_version as i64, event.kind.as_str(), event.occurred_at.as_str(), payload, persisted_payload_hash],
+            "INSERT INTO events(mission_id, route_id, sequence, event_id, schema_version, kind, occurred_at, payload, raw_evidence, payload_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![event.mission_id.to_string(), event.route_id.to_string(), sequence, event.event_id.to_string(), event.schema_version as i64, event.kind.as_str(), event.occurred_at.as_str(), payload, persisted_raw_evidence, persisted_payload_hash],
         )?;
         tx.commit()?;
         Ok(())
@@ -184,7 +197,7 @@ impl EncryptedLedger {
 
     pub fn replay_events(&self, mission_id: &MissionId) -> Result<Vec<EventEnvelope>, LedgerError> {
         let mut statement = self.connection.prepare(
-            "SELECT route_id, sequence, event_id, schema_version, kind, occurred_at, payload, payload_hash FROM events WHERE mission_id = ?1 ORDER BY sequence",
+            "SELECT route_id, sequence, event_id, schema_version, kind, occurred_at, payload, raw_evidence, payload_hash FROM events WHERE mission_id = ?1 ORDER BY sequence",
         )?;
         let rows = statement.query_map([mission_id.to_string()], |row| {
             let route_id: String = row.get(0)?;
@@ -194,7 +207,8 @@ impl EncryptedLedger {
             let kind: String = row.get(4)?;
             let occurred_at: String = row.get(5)?;
             let payload: String = row.get(6)?;
-            let payload_hash: String = row.get(7)?;
+            let raw_evidence: Option<String> = row.get(7)?;
+            let payload_hash: String = row.get(8)?;
             let payload = serde_json::from_str(&payload)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             let mut event =
@@ -219,7 +233,24 @@ impl EncryptedLedger {
             event.occurred_at = Timestamp::parse(occurred_at)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
             event.payload_hash = payload_hash;
+            event.raw_evidence = raw_evidence
+                .map(|value| serde_json::from_str(&value))
+                .transpose()
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             Ok(event)
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn mission_ids(&self) -> Result<Vec<MissionId>, LedgerError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT DISTINCT mission_id FROM events ORDER BY mission_id")?;
+        let rows = statement.query_map([], |row| {
+            let value: String = row.get(0)?;
+            value
+                .parse()
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -235,6 +266,19 @@ impl EncryptedLedger {
 fn apply_key(connection: &Connection, key: &[u8; 32]) -> Result<(), LedgerError> {
     let hex: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
     connection.execute_batch(&format!("PRAGMA key = \"x'{hex}'\";"))?;
+    Ok(())
+}
+
+fn ensure_raw_evidence_column(connection: &Connection) -> Result<(), LedgerError> {
+    let mut statement = connection.prepare("PRAGMA table_info(events)")?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    let has_column = columns
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|name| name == "raw_evidence");
+    if !has_column {
+        connection.execute("ALTER TABLE events ADD COLUMN raw_evidence TEXT", [])?;
+    }
     Ok(())
 }
 

@@ -15,7 +15,7 @@ use mission_protocol::frame::{read_frame, write_frame};
 use mission_protocol::handshake::{
     ClientMessage, InstallSecretProvider, PRODUCT_INSTALL_ID, ServerMessage,
 };
-use mission_supervisor::ipc::IpcServer;
+use mission_supervisor::ipc::{IpcDispatcher, IpcServer};
 use windows_sys::Win32::Foundation::{ERROR_PIPE_CONNECTED, GetLastError, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
 use windows_sys::Win32::System::Pipes::{
@@ -39,6 +39,20 @@ const FIXTURE_SECRET: &[u8] = b"desktop-bridge-fixture-secret";
 
 struct FakePipe {
     response: Result<String, BridgeError>,
+}
+
+struct EchoDispatcher;
+
+impl IpcDispatcher for EchoDispatcher {
+    fn dispatch(
+        &self,
+        command: &str,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({ "command": command, "request": request }))
+    }
+
+    fn touch_ui(&self) {}
 }
 
 impl SupervisorTransport for FakePipe {
@@ -189,6 +203,37 @@ fn authentication_failures_map_to_a_fixed_renderer_error() {
 }
 
 #[test]
+fn real_transport_dispatches_allowlisted_mission_commands_over_the_authenticated_pipe() {
+    let pipe_name = unique_pipe_name();
+    let server = IpcServer::spawn_with_dispatcher(
+        &pipe_name,
+        PRODUCT_INSTALL_ID,
+        FixtureSecret,
+        Arc::new(EchoDispatcher),
+    )
+    .expect("start mission command server");
+    let bridge = SupervisorBridge::new(LocalSupervisorTransport::for_test(
+        &pipe_name,
+        FixtureSecret,
+    ));
+
+    let result = bridge
+        .dispatch_mission(
+            "subscribe_mission",
+            serde_json::json!({ "missionId": "mission-1" }),
+        )
+        .expect("dispatch mission command");
+
+    assert_eq!(result["command"], "subscribe_mission");
+    assert_eq!(result["request"]["missionId"], "mission-1");
+    assert_eq!(
+        bridge.dispatch_mission("arbitrary_shell", serde_json::json!({})),
+        Err("COMMAND_NOT_ALLOWED".to_owned())
+    );
+    server.shutdown().expect("stop mission command server");
+}
+
+#[test]
 fn initial_status_starts_the_packaged_supervisor_then_retries() {
     let bridge = SupervisorBridge::new(StartsThenConnects { started: false });
 
@@ -208,11 +253,20 @@ fn packaged_supervisor_command_has_an_independent_lifetime() {
     let command = supervisor_bridge::packaged_supervisor_command(
         Path::new("mission-control-supervisor.exe"),
         data_dir,
+        "mission-control-test",
+        Some("mission-control-e2e-profile"),
     );
 
     assert_eq!(
         command.get_args().collect::<Vec<_>>(),
-        [std::ffi::OsStr::new("--data-dir"), data_dir.as_os_str()]
+        [
+            std::ffi::OsStr::new("--data-dir"),
+            data_dir.as_os_str(),
+            std::ffi::OsStr::new("--pipe-name"),
+            std::ffi::OsStr::new("mission-control-test"),
+            std::ffi::OsStr::new("--instance-scope"),
+            std::ffi::OsStr::new("mission-control-e2e-profile"),
+        ]
     );
 }
 

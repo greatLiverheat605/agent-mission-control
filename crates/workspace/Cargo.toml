@@ -1,0 +1,15 @@
+[package]
+name = "mission-workspace"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+mission-domain = { path = "../domain" }
+mission-ledger = { path = "../ledger" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3.23"
