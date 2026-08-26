@@ -105,6 +105,8 @@ export const ZH_MESSAGES = {
   "panel.copyPathAria": "复制路径 {path}",
   "panel.loadout": "载荷",
   "panel.noLoadout": "未报告载荷项",
+  "panel.loadoutChanged": "载荷已变化",
+  "panel.loadoutPaused": "任务已暂停，等待复核",
   "panel.flightEnvelope": "飞行包线",
   "panel.budget": "预算",
   "panel.budgetUnavailable": "预算遥测不可用",

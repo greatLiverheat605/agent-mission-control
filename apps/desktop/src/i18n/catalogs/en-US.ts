@@ -103,6 +103,8 @@ export const EN_MESSAGES = {
   "panel.copyPathAria": "Copy path {path}",
   "panel.loadout": "Loadout",
   "panel.noLoadout": "No loadout items reported",
+  "panel.loadoutChanged": "Loadout changed",
+  "panel.loadoutPaused": "Mission paused pending review",
   "panel.flightEnvelope": "Flight envelope",
   "panel.budget": "Budget",
   "panel.budgetUnavailable": "Budget telemetry unavailable",

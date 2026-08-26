@@ -45,7 +45,7 @@ export type FlightViewModel = {
   currentAction: { summary: string; explanation: string; impact: string[]; nextDecision: string };
   evidenceBatches: EvidenceBatchView[];
   pendingApprovals: Array<{ id: string; action: string; scope: string; expiresAt: string | null }>;
-  loadout: { provider: string; model: string; items: Array<{ name: string; status: string; source: string }> };
+  loadout: { provider: string; model: string; items: Array<{ name: string; status: string; source: string }>; change?: { previous: string; next: string } | null };
   budget: Array<{ dimension: string; used: number | null; limit: number | null; unit: string; status: string }>;
   notifications: Array<{ id: string; level: string; message: string }>;
   renderConfidence: RenderConfidence;
@@ -182,6 +182,7 @@ function evidenceViews(events: MissionEvent[]): EvidenceBatchView[] {
 
 function loadoutView(events: MissionEvent[]): FlightViewModel["loadout"] {
   const event = lastEvent(events, "loadout_snapshot");
+  const changeEvent = lastEvent(events, "loadout_changed");
   const rawItems = Array.isArray(event?.payload.items) ? event.payload.items : [];
   return {
     provider: stringValue(event?.payload.provider) ?? "Codex",
@@ -190,6 +191,10 @@ function loadoutView(events: MissionEvent[]): FlightViewModel["loadout"] {
       const item = objectValue(value);
       return { name: stringValue(item.name) ?? `Item ${index + 1}`, status: stringValue(item.status) ?? "loaded", source: stringValue(item.source) ?? "native" };
     }),
+    change: changeEvent ? {
+      previous: stringValue(changeEvent.payload.previous_fingerprint) ?? "previous",
+      next: stringValue(changeEvent.payload.next_fingerprint) ?? "next",
+    } : null,
   };
 }
 

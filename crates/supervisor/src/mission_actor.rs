@@ -158,8 +158,7 @@ impl<L: ActorLedger> MissionActor<L> {
                 self.approvals.insert(approval_id.clone(), request);
                 Ok(DispatchGate::WaitingForApproval(approval_id))
             }
-            PolicyDecision::RequireUserJudgment { .. }
-            | PolicyDecision::DenyAndPause { .. } => {
+            PolicyDecision::RequireUserJudgment { .. } | PolicyDecision::DenyAndPause { .. } => {
                 self.request_safe_pause("policy denied action dispatch")?;
                 Ok(DispatchGate::Paused)
             }
@@ -260,7 +259,10 @@ impl<L: ActorLedger> MissionActor<L> {
                     (EventKind::BudgetExceeded, dimension)
                 }
             };
-            self.append(kind, serde_json::json!({"dimension": format!("{dimension:?}")}))?;
+            self.append(
+                kind,
+                serde_json::json!({"dimension": format!("{dimension:?}")}),
+            )?;
         }
         if pause {
             self.request_safe_pause("mission budget reached at safe boundary")?;
@@ -286,6 +288,54 @@ impl<L: ActorLedger> MissionActor<L> {
             self.request_safe_pause("flight envelope identity changed")?;
         }
         Ok(decision)
+    }
+
+    pub fn check_loadout_change(
+        &mut self,
+        previous_fingerprint: &str,
+        next_fingerprint: &str,
+    ) -> Result<bool, ActorError> {
+        if previous_fingerprint.trim().is_empty()
+            || next_fingerprint.trim().is_empty()
+            || previous_fingerprint == next_fingerprint
+        {
+            return Ok(false);
+        }
+        let approval_ids = self
+            .approvals
+            .values()
+            .filter(|approval| {
+                matches!(
+                    approval.state(),
+                    ApprovalState::Pending | ApprovalState::Approved
+                )
+            })
+            .map(|approval| approval.id().to_owned())
+            .collect::<Vec<_>>();
+        for approval_id in approval_ids {
+            let mut approval = self
+                .approvals
+                .get(&approval_id)
+                .cloned()
+                .ok_or(ActorError::InvalidApprovalSubject)?;
+            approval
+                .revoke_for_loadout_change()
+                .map_err(ActorError::Approval)?;
+            self.append(
+                EventKind::ApprovalRevoked,
+                serde_json::json!({"approval": approval, "reason": "loadout_changed"}),
+            )?;
+            self.approvals.insert(approval_id, approval);
+        }
+        self.append(
+            EventKind::LoadoutChanged,
+            serde_json::json!({
+                "previous_fingerprint": previous_fingerprint,
+                "next_fingerprint": next_fingerprint,
+            }),
+        )?;
+        self.request_safe_pause("provider loadout changed")?;
+        Ok(true)
     }
 
     pub fn record_agent_event(&mut self, event: AgentEvent) -> Result<(), ActorError> {
@@ -414,6 +464,9 @@ fn replay_approvals(events: &[EventEnvelope]) -> HashMap<String, ApprovalRequest
 mod tests {
     use super::MissionActor;
     use mission_domain::{MissionId, RouteId};
+    use mission_policy::{
+        ActionClass, ApprovalActor, ApprovalRequest, ApprovalScope, ApprovalState, ApprovalSubject,
+    };
 
     #[test]
     fn append_first_keeps_sequence_and_disconnect_is_safe_pause() {
@@ -430,5 +483,51 @@ mod tests {
                 reason: "ui disconnected".to_owned()
             }
         );
+    }
+
+    #[test]
+    fn loadout_change_revokes_bound_approvals_before_pausing() {
+        let mission_id = MissionId::new();
+        let route_id = RouteId::new();
+        let mut actor = MissionActor::new(mission_id, route_id, Vec::new());
+        let approval = ApprovalRequest::new(
+            "approval-loadout",
+            ApprovalSubject {
+                mission_id,
+                route_id,
+                action_digest: "sha256:action".to_owned(),
+                action_class: ActionClass::Write,
+                contract_version: 1,
+                loadout_fingerprint: "loadout-v1".to_owned(),
+            },
+            ApprovalScope::Once,
+            ApprovalActor::Supervisor,
+            u64::MAX,
+        )
+        .expect("approval");
+        actor.approvals.insert(approval.id().to_owned(), approval);
+
+        assert!(
+            actor
+                .check_loadout_change("loadout-v1", "loadout-v2")
+                .expect("loadout change")
+        );
+        assert_eq!(
+            actor
+                .pending_approval("approval-loadout")
+                .expect("approval")
+                .state(),
+            ApprovalState::Revoked
+        );
+        assert!(
+            actor
+                .ledger()
+                .iter()
+                .any(|event| event.kind == mission_domain::EventKind::LoadoutChanged)
+        );
+        assert!(matches!(
+            actor.state(),
+            crate::pause::PauseState::PauseRequested { .. }
+        ));
     }
 }

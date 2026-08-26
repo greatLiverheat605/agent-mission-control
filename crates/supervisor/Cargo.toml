@@ -18,6 +18,7 @@ test-credential-target = []
 adapter-claude = { path = "../adapter-claude" }
 adapter-codex = { path = "../adapter-codex" }
 adapter-core = { path = "../adapter-core" }
+cc-switch-bridge = { path = "../cc-switch-bridge" }
 mission-domain = { path = "../domain" }
 mission-ledger = { path = "../ledger" }
 mission-policy = { path = "../policy" }

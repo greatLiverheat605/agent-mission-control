@@ -2,6 +2,7 @@
 pub mod event_pipeline;
 #[cfg(windows)]
 pub mod ipc;
+pub mod loadout_monitor;
 pub mod mission_actor;
 #[cfg(windows)]
 pub mod mission_service;

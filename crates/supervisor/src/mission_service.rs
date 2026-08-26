@@ -107,6 +107,7 @@ pub struct MissionService {
     runs: Arc<Mutex<HashMap<String, String>>>,
     run_providers: Arc<Mutex<HashMap<String, ProviderId>>>,
     adapters: Arc<HashMap<ProviderId, Arc<dyn AgentAdapter>>>,
+    loadouts: Arc<Mutex<crate::loadout_monitor::LoadoutMonitor>>,
     ledger_path: PathBuf,
     last_ui_seen: Mutex<Instant>,
     runtime: Runtime,
@@ -134,6 +135,7 @@ impl MissionService {
             runs: Arc::new(Mutex::new(HashMap::new())),
             run_providers: Arc::new(Mutex::new(HashMap::new())),
             adapters: Arc::new(adapters),
+            loadouts: Arc::new(Mutex::new(crate::loadout_monitor::LoadoutMonitor::default())),
             ledger_path: data_dir.join("mission-ledger.db"),
             last_ui_seen: Mutex::new(Instant::now()),
             runtime,
@@ -565,6 +567,43 @@ impl MissionService {
             .and_then(|providers| providers.get(&mission_id.to_string()).copied())
     }
 
+    pub async fn check_loadout_before_model_request(
+        &self,
+        mission_id: MissionId,
+        next_fingerprint: &str,
+    ) -> Result<Option<crate::loadout_monitor::LoadoutChange>, String> {
+        let change = self
+            .loadouts
+            .lock()
+            .map_err(|_| "LOADOUT_STATE_POISONED".to_owned())?
+            .check_fingerprint(&mission_id, next_fingerprint)
+            .map_err(str::to_owned)?;
+        let Some(change) = change else {
+            return Ok(None);
+        };
+        {
+            let mut missions = self
+                .missions
+                .lock()
+                .map_err(|_| "MISSION_STATE_POISONED".to_owned())?;
+            let actor = missions
+                .get_mut(&mission_id.to_string())
+                .ok_or("MISSION_NOT_FOUND")?;
+            actor
+                .check_loadout_change(&change.previous_fingerprint, &change.next_fingerprint)
+                .map_err(|error| format!("LOADOUT_CHANGE_FAILED:{error:?}"))?;
+        }
+        if let Some(run_id) = self.active_run_id(&mission_id)? {
+            let provider = self.run_provider(&mission_id).unwrap_or_default();
+            self.adapter(provider)
+                .map_err(|error| error.to_string())?
+                .request_safe_pause(&run_id)
+                .await
+                .map_err(|error| format!("LOADOUT_PAUSE_FAILED:{error}"))?;
+        }
+        Ok(Some(change))
+    }
+
     fn adapter(&self, provider: ProviderId) -> Result<Arc<dyn AgentAdapter>, String> {
         self.adapters
             .get(&provider)
@@ -618,6 +657,11 @@ impl MissionService {
             })
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| "LOADOUT_FINGERPRINT_REQUIRED".to_owned())?;
+        self.loadouts
+            .lock()
+            .map_err(|_| "LOADOUT_STATE_POISONED".to_owned())?
+            .freeze_fingerprint(&mission_id, loadout_fingerprint.clone())
+            .map_err(str::to_owned)?;
         let start_request = StartAgentRequest {
             provider,
             mission_id,

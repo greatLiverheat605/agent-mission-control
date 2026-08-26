@@ -42,6 +42,7 @@ pub enum EventKind {
     BudgetApprovalRequired,
     BudgetExceeded,
     FlightEnvelopeChanged,
+    LoadoutChanged,
     PauseRequested,
     Unknown(String),
 }
@@ -66,6 +67,7 @@ impl EventKind {
             Self::BudgetApprovalRequired => "budget_approval_required",
             Self::BudgetExceeded => "budget_exceeded",
             Self::FlightEnvelopeChanged => "flight_envelope_changed",
+            Self::LoadoutChanged => "loadout_changed",
             Self::PauseRequested => "pause_requested",
             Self::Unknown(value) => value,
         }
@@ -117,6 +119,7 @@ impl<'de> Deserialize<'de> for EventKind {
                     "budget_approval_required" => EventKind::BudgetApprovalRequired,
                     "budget_exceeded" => EventKind::BudgetExceeded,
                     "flight_envelope_changed" => EventKind::FlightEnvelopeChanged,
+                    "loadout_changed" => EventKind::LoadoutChanged,
                     "pause_requested" => EventKind::PauseRequested,
                     other => EventKind::Unknown(other.to_owned()),
                 })

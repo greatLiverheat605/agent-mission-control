@@ -204,6 +204,14 @@ impl ApprovalRequest {
         Ok(())
     }
 
+    pub fn revoke_for_loadout_change(&mut self) -> Result<(), ApprovalError> {
+        if !matches!(self.state, ApprovalState::Pending | ApprovalState::Approved) {
+            return Err(ApprovalError::NotRevocable);
+        }
+        self.transition(ApprovalState::Revoked, Some(ApprovalActor::Supervisor));
+        Ok(())
+    }
+
     pub fn expire(&mut self, now_ms: u64) -> bool {
         if matches!(self.state, ApprovalState::Pending | ApprovalState::Approved)
             && now_ms >= self.expires_at_ms
