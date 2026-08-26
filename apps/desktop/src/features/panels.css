@@ -560,8 +560,7 @@
 
 @media (max-width: 1439px) {
   .radar-scope { height: 118px; }
-  .beam-cell--phase,
-  .beam-cell--sequence { display: none; }
+  .beam-cell--phase { display: none; }
   .phase-chip { max-width: 170px; padding: 6px 10px; }
   .cockpit-view-frame { inset: 10px 10px 10px 132px; }
   .hud-tl,

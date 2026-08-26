@@ -223,7 +223,6 @@
     writing-mode: vertical-rl;
   }
 
-  .mc-responsive-drawer[data-side="right"] .mc-responsive-drawer__trigger { transform: rotate(180deg); }
   .mc-responsive-drawer__trigger[aria-expanded="true"] { border-color: var(--mc-nav-muted); color: var(--mc-nav); }
   .mc-responsive-drawer__panel {
     position: fixed;

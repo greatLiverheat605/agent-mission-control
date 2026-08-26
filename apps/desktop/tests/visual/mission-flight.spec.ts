@@ -37,6 +37,18 @@ test("direct development root renders the integrated cockpit", async ({ page }, 
   await testInfo.attach("direct-root-cockpit", { body: await page.screenshot({ fullPage: true }), contentType: "image/png" });
 });
 
+test("keeps the right drawer label upright when the cockpit collapses", async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 640 });
+  await openMissionFixture(page, visualCase("responsive-long-content", { contentCase: "long" }).config);
+
+  const trigger = page.locator('.mission-shell__starboard .mc-responsive-drawer__trigger');
+  await expect(trigger).toBeVisible();
+  await expect.poll(() => trigger.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { transform: style.transform, writingMode: style.writingMode };
+  })).toEqual({ transform: "none", writingMode: "vertical-rl" });
+});
+
 test("pairwise visual cases cover every fixture dimension value", () => {
   const configs = PAIRWISE_VISUAL_CASES.map(({ config }) => config);
   expect(new Set(configs.map(({ routeState }) => routeState))).toEqual(new Set(ROUTE_STATES));
@@ -56,6 +68,7 @@ for (const viewport of viewports) {
 
     await expect(page.locator(".mission-shell__softkeys").getByRole("tab")).toHaveCount(6);
     await expect(page.locator(".flight-helm-commands .hold-command")).toBeVisible();
+    if (viewport.width >= 1280) await expect(page.locator(".beam-cell--sequence")).toBeVisible();
     await expect(page.getByRole("img", { name: /Control Coding.*Executing.*Run visual release gates/i })).toBeVisible();
     const portDrawerOpened = await openDrawerIfNeeded(page, "Mission registry");
     await expect(page.locator("#mission-port-console .project-mission")).toHaveCount(11);

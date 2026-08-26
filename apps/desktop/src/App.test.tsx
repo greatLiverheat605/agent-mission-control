@@ -104,7 +104,10 @@ test("desktop window and capability config keep the renderer restricted", () => 
   const window = tauriConfig.app.windows[0];
 
   expect(window).toMatchObject({
-    fullscreen: true,
+    fullscreen: false,
+    maximized: true,
+    decorations: true,
+    resizable: true,
     minWidth: 1024,
     minHeight: 640,
   });

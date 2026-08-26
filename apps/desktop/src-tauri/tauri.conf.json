@@ -5,6 +5,7 @@
   "identifier": "com.openai.agent-mission-control",
   "build": {
     "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
     "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "../dist"
   },
@@ -17,7 +18,8 @@
         "height": 680,
         "minWidth": 1024,
         "minHeight": 640,
-        "fullscreen": true,
+        "fullscreen": false,
+        "maximized": true,
         "resizable": true,
         "decorations": true
       }
