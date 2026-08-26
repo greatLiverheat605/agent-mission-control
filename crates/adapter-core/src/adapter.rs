@@ -6,10 +6,12 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::{Mutex, mpsc};
 
-use crate::capability::AgentCapabilityReport;
+use crate::capability::{AgentCapabilityReport, ProviderId};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StartAgentRequest {
+    #[serde(default)]
+    pub provider: ProviderId,
     pub mission_id: MissionId,
     pub route_id: RouteId,
     pub project_root: String,
@@ -19,6 +21,39 @@ pub struct StartAgentRequest {
     pub model: Option<String>,
     pub loadout_fingerprint: String,
     pub resume_token: Option<String>,
+    #[serde(default)]
+    pub loadout: Option<LoadoutSnapshot>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LoadoutSnapshot {
+    #[serde(default)]
+    pub provider: ProviderId,
+    pub model: Option<String>,
+    #[serde(default)]
+    pub config_fingerprint: String,
+    #[serde(default)]
+    pub hooks_fingerprint: String,
+    #[serde(default)]
+    pub skills_fingerprint: String,
+    #[serde(default)]
+    pub plugins_fingerprint: String,
+    #[serde(default)]
+    pub mcp_fingerprint: String,
+}
+
+impl LoadoutSnapshot {
+    pub fn fingerprint_material(&self) -> Vec<String> {
+        vec![
+            self.provider.to_string(),
+            self.model.clone().unwrap_or_default(),
+            self.config_fingerprint.clone(),
+            self.hooks_fingerprint.clone(),
+            self.skills_fingerprint.clone(),
+            self.plugins_fingerprint.clone(),
+            self.mcp_fingerprint.clone(),
+        ]
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -1,5 +1,5 @@
 use crate::path_probe::{ProbeOptions, VersionProbe, probe_executable, resolve_executable};
-use adapter_core::{AgentCapabilityReport, Capability, InstallState};
+use adapter_core::{AgentCapabilityReport, Capability, InstallState, ProviderId};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -73,15 +73,23 @@ fn from_probe(agent: AgentKind, probe: VersionProbe) -> Detection {
     Detection {
         agent,
         report: AgentCapabilityReport {
+            provider: provider_id(agent),
             agent: agent.executable().to_owned(),
             version: probe.version,
             install_state,
             capability: Capability {
-                structured_events: agent == AgentKind::Codex,
-                resume: agent == AgentKind::Codex,
-                approval: agent == AgentKind::Codex,
-                safe_pause: agent == AgentKind::Codex,
-                terminal_fallback: true,
+                structured_events: agent.runnable() && !unknown_version,
+                resume: agent == AgentKind::Codex && !unknown_version,
+                approval: agent.runnable() && !unknown_version,
+                safe_pause: agent.runnable() && !unknown_version,
+                terminal_fallback: agent.runnable() && !unknown_version,
+            },
+            unavailable_reason: if !agent.runnable() {
+                Some("provider detected but runtime adapter is unavailable".to_owned())
+            } else if unknown_version {
+                Some("provider version is unknown".to_owned())
+            } else {
+                None
             },
             executable_hash: Some(probe.executable_hash),
             configuration_source: Some("local_cli".to_owned()),
@@ -98,6 +106,7 @@ fn missing_with_path(agent: AgentKind, executable: Option<PathBuf>, reason: Stri
     Detection {
         agent,
         report: AgentCapabilityReport {
+            provider: provider_id(agent),
             agent: agent.executable().to_owned(),
             version: None,
             install_state: InstallState::Missing,
@@ -108,10 +117,20 @@ fn missing_with_path(agent: AgentKind, executable: Option<PathBuf>, reason: Stri
                 safe_pause: false,
                 terminal_fallback: false,
             },
+            unavailable_reason: Some(reason.clone()),
             executable_hash: None,
             configuration_source: None,
         },
         executable,
         reason: Some(reason),
+    }
+}
+
+const fn provider_id(agent: AgentKind) -> ProviderId {
+    match agent {
+        AgentKind::Codex => ProviderId::Codex,
+        AgentKind::Claude => ProviderId::Claude,
+        AgentKind::OpenCode => ProviderId::OpenCode,
+        AgentKind::ZCode => ProviderId::ZCode,
     }
 }

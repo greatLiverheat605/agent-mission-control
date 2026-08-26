@@ -17,6 +17,7 @@ async fn app_server_run_consumes_events_and_supports_pause_and_terminate() {
     let workspace = tempfile::tempdir().expect("workspace");
     let adapter = CodexAdapter::new(executable);
     let request = StartAgentRequest {
+        provider: adapter_core::ProviderId::Codex,
         mission_id: MissionId::new(),
         route_id: RouteId::new(),
         project_root: workspace.path().display().to_string(),
@@ -26,6 +27,7 @@ async fn app_server_run_consumes_events_and_supports_pause_and_terminate() {
         model: None,
         loadout_fingerprint: "fixture".to_owned(),
         resume_token: None,
+        loadout: None,
     };
     let (sink, mut sink_rx) = mpsc::unbounded_channel();
     let handle = adapter.start(request, sink).await.expect("start");

@@ -5,6 +5,46 @@ export type RouteId = Branded<string, "RouteId">;
 export type EventId = Branded<string, "EventId">;
 export type Rfc3339 = Branded<string, "Rfc3339">;
 
+export type ProviderId = "codex" | "claude" | "opencode" | "zcode";
+
+export interface ProviderCapability {
+  provider: ProviderId;
+  agent: string;
+  version?: string;
+  installState: "installed" | "missing" | "detected_not_runnable" | "unknown";
+  available: boolean;
+  unavailableReason?: string;
+  structuredEvents: boolean;
+  resume: boolean;
+  approval: boolean;
+  safePause: boolean;
+  terminalFallback: boolean;
+}
+
+export interface LoadoutSnapshot {
+  provider: ProviderId;
+  model?: string;
+  configFingerprint: string;
+  hooksFingerprint: string;
+  skillsFingerprint: string;
+  pluginsFingerprint: string;
+  mcpFingerprint: string;
+}
+
+export interface StartAgentRequest {
+  missionId: MissionId;
+  routeId: RouteId;
+  provider?: ProviderId;
+  projectRoot: string;
+  routeWorkspace: string;
+  readOnly: boolean;
+  approvedEnvironment: Array<[string, string]>;
+  model?: string;
+  loadoutFingerprint: string;
+  resumeToken?: string;
+  loadout?: LoadoutSnapshot;
+}
+
 export type IpcCommand =
   | "Handshake"
   | "CreateMission"
@@ -14,7 +54,54 @@ export type IpcCommand =
   | "ForceTerminate"
   | "ResolveApproval"
   | "SubscribeMission"
-  | "BuildRecoveryPackage";
+  | "ReviewMemory"
+  | "BuildContextPack"
+  | "BuildRecoveryPackage"
+  | "HandoffProvider";
+
+export type ContinuityErrorCode =
+  | "PROVIDER_UNAVAILABLE"
+  | "PROVIDER_NOT_SELECTED"
+  | "LOADOUT_MISMATCH"
+  | "MEMORY_SOURCE_REQUIRED"
+  | "CONTEXTPACK_BUDGET_EXCEEDED"
+  | "RECOVERY_TAMPERED"
+  | "RECOVERY_SEQUENCE_INVALID"
+  | "PENDING_APPROVAL_MISMATCH"
+  | "PERMISSION_EXPANSION"
+  | "UNSUPPORTED_COMMAND";
+
+export interface ReviewMemoryRequest {
+  missionId: MissionId;
+  candidateIds: string[];
+  expectedRevision: number;
+}
+
+export interface ContextPackRequest {
+  missionId: MissionId;
+  routeId: RouteId;
+  maxTokens: number;
+  expectedSequence: number;
+}
+
+export interface BuildRecoveryPackageRequest {
+  missionId: MissionId;
+  routeId: RouteId;
+  contractVersion: number;
+  checkpointId: string;
+  ledgerSequence: number;
+  loadoutFingerprint: string;
+  contextPackHash: string;
+  pendingApprovalHash?: string;
+}
+
+export interface ProviderHandoffRequest {
+  missionId: MissionId;
+  routeId: RouteId;
+  targetProvider: ProviderId;
+  contextPackHash: string;
+  pendingApprovalHash?: string;
+}
 
 export type Actor = "user" | "renderer" | "supervisor" | "agent";
 
@@ -64,6 +151,9 @@ export const IPC_COMMANDS: readonly IpcCommand[] = [
   "ForceTerminate",
   "ResolveApproval",
   "SubscribeMission",
+  "ReviewMemory",
+  "BuildContextPack",
   "BuildRecoveryPackage",
+  "HandoffProvider",
 ] as const;
 

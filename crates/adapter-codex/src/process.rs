@@ -38,6 +38,7 @@ impl CodexAdapter {
 impl AgentAdapter for CodexAdapter {
     async fn probe(&self) -> Result<AgentCapabilityReport, AdapterError> {
         Ok(AgentCapabilityReport {
+            provider: adapter_core::ProviderId::Codex,
             agent: "codex".to_owned(),
             version: None,
             install_state: adapter_core::InstallState::Installed,
@@ -48,6 +49,7 @@ impl AgentAdapter for CodexAdapter {
                 safe_pause: true,
                 terminal_fallback: true,
             },
+            unavailable_reason: None,
             executable_hash: None,
             configuration_source: Some("codex-cli".to_owned()),
         })

@@ -4,7 +4,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use adapter_codex::CodexAdapter;
-use adapter_core::{AgentAdapter, AgentHandle, StartAgentRequest};
+use adapter_core::{
+    AgentAdapter, AgentCapabilityReport, AgentHandle, LoadoutSnapshot, ProviderId,
+    StartAgentRequest,
+};
 use mission_domain::{EventKind, MissionId, RouteId};
 use mission_ledger::{EncryptedLedger, WindowsCredentialKeyStore};
 use serde::{Deserialize, Serialize};
@@ -24,6 +27,10 @@ pub const MISSION_COMMANDS: [&str; 6] = [
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MissionCommandRequest {
+    #[serde(default)]
+    pub provider: Option<ProviderId>,
+    #[serde(default)]
+    pub loadout: Option<LoadoutSnapshot>,
     pub mission_id: Option<String>,
     pub route_id: Option<String>,
     pub expected_version: Option<u64>,
@@ -41,6 +48,10 @@ pub struct MissionCommandResult {
     pub route_id: Option<String>,
     pub sequence: Option<u64>,
     pub error_code: Option<String>,
+    #[serde(default)]
+    pub provider: Option<ProviderId>,
+    #[serde(default)]
+    pub capability: Option<AgentCapabilityReport>,
     #[serde(default)]
     pub events: Vec<Value>,
 }
@@ -263,6 +274,8 @@ impl MissionService {
             }),
             sequence,
             error_code: None,
+            provider: None,
+            capability: None,
             events,
         })
     }
@@ -409,6 +422,8 @@ impl MissionService {
                 .or(request.route_id),
             sequence: Some(actor.sequence()),
             error_code: None,
+            provider: request.provider,
+            capability: None,
             events,
         })
     }
@@ -504,6 +519,7 @@ impl MissionService {
             .clone()
             .ok_or_else(|| "PROJECT_ROOT_REQUIRED".to_owned())?;
         let start_request = StartAgentRequest {
+            provider: request.provider.unwrap_or_default(),
             mission_id,
             route_id,
             project_root: project_root.clone(),
@@ -513,6 +529,7 @@ impl MissionService {
             model: None,
             loadout_fingerprint: "desktop-default".to_owned(),
             resume_token: None,
+            loadout: request.loadout.clone(),
         };
         let (sink, _sink_rx) = mpsc::unbounded_channel();
         let handle = self

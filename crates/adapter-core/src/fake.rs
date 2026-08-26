@@ -76,6 +76,7 @@ impl FakeAdapter {
 impl AgentAdapter for FakeAdapter {
     async fn probe(&self) -> Result<AgentCapabilityReport, AdapterError> {
         Ok(AgentCapabilityReport {
+            provider: crate::ProviderId::Codex,
             agent: "fake-codex".to_owned(),
             version: Some("fixture-1".to_owned()),
             install_state: InstallState::Installed,
@@ -86,6 +87,7 @@ impl AgentAdapter for FakeAdapter {
                 safe_pause: true,
                 terminal_fallback: true,
             },
+            unavailable_reason: None,
             executable_hash: Some("fixture".to_owned()),
             configuration_source: Some("test".to_owned()),
         })

@@ -51,4 +51,15 @@ fn probes_only_version_and_classifies_non_runnable_agents() {
         .install_state,
         InstallState::Missing
     );
+
+    let claude = shim(dir.path(), "claude", body);
+    let _ = claude;
+    let detected = detect(
+        AgentKind::Claude,
+        Some(dir.path()),
+        &ProbeOptions::default(),
+    );
+    assert_eq!(detected.report.provider, adapter_core::ProviderId::Claude);
+    assert!(detected.report.capability.structured_events);
+    assert!(detected.report.unavailable_reason.is_none());
 }

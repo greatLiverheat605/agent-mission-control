@@ -60,6 +60,7 @@ impl TestProcess {
     #[cfg(any(debug_assertions, feature = "test-credential-target"))]
     fn spawn_with_flags(pipe_name: &str, data_dir: &Path, creation_flags: u32) -> Self {
         let credential_target = test_credential_target(pipe_name);
+        let instance_scope = format!("mission-supervisor-test-{}", data_dir.display());
         Self::spawn_args_with_flags(
             [
                 "--pipe-name",
@@ -70,6 +71,8 @@ impl TestProcess {
                 &std::process::id().to_string(),
                 "--log-level",
                 "debug",
+                "--instance-scope",
+                instance_scope.as_str(),
                 "--credential-target",
                 &credential_target,
             ],
@@ -82,12 +85,15 @@ impl TestProcess {
     #[cfg(any(debug_assertions, feature = "test-credential-target"))]
     fn spawn_with_stdout(pipe_name: &str, data_dir: &Path, stdout: Stdio) -> Self {
         let credential_target = test_credential_target(pipe_name);
+        let instance_scope = format!("mission-supervisor-test-{}", data_dir.display());
         Self::spawn_args_with_flags(
             [
                 "--pipe-name",
                 pipe_name,
                 "--data-dir",
                 data_dir.to_str().expect("test data dir is valid Unicode"),
+                "--instance-scope",
+                instance_scope.as_str(),
                 "--credential-target",
                 &credential_target,
             ],
@@ -100,6 +106,7 @@ impl TestProcess {
     #[cfg(any(debug_assertions, feature = "test-credential-target"))]
     fn spawn_with_parent(pipe_name: &str, data_dir: &Path, parent_pid: u32) -> Self {
         let credential_target = test_credential_target(pipe_name);
+        let instance_scope = format!("mission-supervisor-test-{}", data_dir.display());
         Self::spawn_args_with_flags(
             [
                 "--pipe-name",
@@ -108,6 +115,8 @@ impl TestProcess {
                 data_dir.to_str().expect("test data dir is valid Unicode"),
                 "--parent-pid",
                 &parent_pid.to_string(),
+                "--instance-scope",
+                instance_scope.as_str(),
                 "--credential-target",
                 &credential_target,
             ],
