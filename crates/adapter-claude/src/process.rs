@@ -168,10 +168,10 @@ impl OwnedJob {
 
     fn terminate(&mut self) -> io::Result<()> {
         #[cfg(windows)]
-        if let Some(handle) = self.handle {
-            if unsafe { TerminateJobObject(handle, 1) } == 0 {
-                return Err(io::Error::last_os_error());
-            }
+        if let Some(handle) = self.handle
+            && unsafe { TerminateJobObject(handle, 1) } == 0
+        {
+            return Err(io::Error::last_os_error());
         }
         Ok(())
     }

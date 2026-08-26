@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderId {
+    #[default]
     Codex,
     Claude,
     OpenCode,
@@ -21,12 +22,6 @@ impl ProviderId {
             Self::OpenCode => "opencode",
             Self::ZCode => "zcode",
         }
-    }
-}
-
-impl Default for ProviderId {
-    fn default() -> Self {
-        Self::Codex
     }
 }
 
