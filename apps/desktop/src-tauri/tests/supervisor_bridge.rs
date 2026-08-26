@@ -234,6 +234,25 @@ fn real_transport_dispatches_allowlisted_mission_commands_over_the_authenticated
 }
 
 #[test]
+fn mission_allowlist_exposes_recovery_package_command() {
+    let expected = [
+        "create_mission",
+        "update_mission_contract",
+        "launch_route",
+        "subscribe_mission",
+        "request_safe_pause",
+        "force_terminate",
+        "build_recovery_package",
+    ];
+
+    assert_eq!(
+        supervisor_bridge::mission_commands!(command_names),
+        expected
+    );
+    assert_eq!(supervisor_bridge::MISSION_ALLOWED_COMMANDS, expected);
+}
+
+#[test]
 fn initial_status_starts_the_packaged_supervisor_then_retries() {
     let bridge = SupervisorBridge::new(StartsThenConnects { started: false });
 

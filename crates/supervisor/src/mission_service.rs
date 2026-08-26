@@ -10,19 +10,21 @@ use adapter_core::{
     StartAgentRequest,
 };
 use mission_domain::{EventKind, MissionId, RouteId};
-use mission_ledger::{EncryptedLedger, WindowsCredentialKeyStore};
+use mission_ledger::{EncryptedBlobStore, EncryptedLedger, KeyStore, WindowsCredentialKeyStore};
+use mission_memory::{RecoveryInput, build_recovery_package};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::mpsc;
 
-pub const MISSION_COMMANDS: [&str; 6] = [
+pub const MISSION_COMMANDS: [&str; 7] = [
     "create_mission",
     "update_mission_contract",
     "launch_route",
     "subscribe_mission",
     "request_safe_pause",
     "force_terminate",
+    "build_recovery_package",
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -43,6 +45,16 @@ pub struct MissionCommandRequest {
     pub loadout_fingerprint: Option<String>,
     #[serde(default)]
     pub resume_token: Option<String>,
+    #[serde(default)]
+    pub checkpoint_id: Option<String>,
+    #[serde(default)]
+    pub contract_version: Option<u64>,
+    #[serde(default)]
+    pub ledger_sequence: Option<u64>,
+    #[serde(default)]
+    pub context_pack_hash: Option<String>,
+    #[serde(default)]
+    pub pending_approval_hash: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -59,6 +71,8 @@ pub struct MissionCommandResult {
     pub capability: Option<AgentCapabilityReport>,
     #[serde(default)]
     pub events: Vec<Value>,
+    #[serde(default)]
+    pub recovery_package: Option<Value>,
 }
 
 pub fn validate_mission_request(request: &MissionCommandRequest) -> Result<(), &'static str> {
@@ -261,6 +275,7 @@ impl MissionService {
             "subscribe_mission" => self.subscribe_mission(request),
             "request_safe_pause" => self.request_safe_pause(request).await,
             "force_terminate" => self.force_terminate(request).await,
+            "build_recovery_package" => self.build_recovery_package(request),
             _ => Err("COMMAND_NOT_ALLOWED".to_owned()),
         }
     }
@@ -316,6 +331,7 @@ impl MissionService {
             provider: None,
             capability: None,
             events,
+            recovery_package: None,
         })
     }
 
@@ -475,6 +491,7 @@ impl MissionService {
             provider: request.provider,
             capability: None,
             events,
+            recovery_package: None,
         })
     }
 
@@ -547,6 +564,105 @@ impl MissionService {
             .force_terminate(&token)
             .map_err(|error| format!("FORCE_TERMINATE_FAILED:{error:?}"))?;
         Self::result(Some(mission_id.to_string()), Some(actor))
+    }
+
+    fn open_recovery_store(&self) -> Result<EncryptedBlobStore, String> {
+        let key = WindowsCredentialKeyStore
+            .load_database_key("mission-control-desktop-v1")
+            .map_err(|error| format!("RECOVERY_KEY_UNAVAILABLE:{error}"))?;
+        let root = self
+            .ledger_path
+            .parent()
+            .ok_or("RECOVERY_ROOT_UNAVAILABLE")?
+            .join("recovery-blobs");
+        EncryptedBlobStore::open_for_ledger(&root, &self.ledger_path, key)
+            .map_err(|error| format!("RECOVERY_STORE_OPEN_FAILED:{error}"))
+    }
+
+    fn build_recovery_package(
+        &self,
+        request: MissionCommandRequest,
+    ) -> Result<MissionCommandResult, String> {
+        let mission_id = Self::mission_id(&request)?;
+        let route_id = Self::route_id(&request)?;
+        let checkpoint_id = request
+            .checkpoint_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or("CHECKPOINT_ID_REQUIRED")?;
+        let contract_version = request
+            .contract_version
+            .ok_or("CONTRACT_VERSION_REQUIRED")?;
+        let ledger_sequence = request.ledger_sequence.ok_or("LEDGER_SEQUENCE_REQUIRED")?;
+        let loadout_fingerprint = request
+            .loadout_fingerprint
+            .filter(|value| !value.trim().is_empty())
+            .ok_or("LOADOUT_FINGERPRINT_REQUIRED")?;
+        let context_pack_hash = request
+            .context_pack_hash
+            .filter(|value| !value.trim().is_empty())
+            .ok_or("CONTEXT_PACK_HASH_REQUIRED")?;
+        let (current_sequence, events) = {
+            let missions = self
+                .missions
+                .lock()
+                .map_err(|_| "MISSION_STATE_POISONED".to_owned())?;
+            let actor = missions
+                .get(&mission_id.to_string())
+                .ok_or("MISSION_NOT_FOUND")?;
+            (
+                actor.sequence(),
+                actor
+                    .replay_after(0)
+                    .into_iter()
+                    .map(|event| {
+                        serde_json::to_value(event).map_err(|_| "EVENT_SERIALIZE_FAILED".to_owned())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        };
+        if ledger_sequence > current_sequence {
+            return Err("RECOVERY_SEQUENCE_INVALID".to_owned());
+        }
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "mission_id": mission_id,
+            "route_id": route_id,
+            "checkpoint_id": checkpoint_id,
+            "ledger_sequence": ledger_sequence,
+            "events": events,
+        }))
+        .map_err(|_| "RECOVERY_PAYLOAD_SERIALIZE_FAILED".to_owned())?;
+        let store = self.open_recovery_store()?;
+        let package = build_recovery_package(
+            &store,
+            RecoveryInput {
+                mission_id,
+                route_id,
+                contract_version,
+                checkpoint_id,
+                ledger_sequence,
+                loadout_fingerprint,
+                context_pack_hash,
+                pending_approval_hash: request.pending_approval_hash,
+                permissions: Default::default(),
+                payload,
+            },
+        )
+        .map_err(|error| format!("RECOVERY_BUILD_FAILED:{error}"))?;
+        let mut result = {
+            let missions = self
+                .missions
+                .lock()
+                .map_err(|_| "MISSION_STATE_POISONED".to_owned())?;
+            Self::result(
+                Some(mission_id.to_string()),
+                missions.get(&mission_id.to_string()),
+            )?
+        };
+        result.recovery_package = Some(
+            serde_json::to_value(package)
+                .map_err(|_| "RECOVERY_RESULT_SERIALIZE_FAILED".to_owned())?,
+        );
+        Ok(result)
     }
 
     fn active_run_id(&self, mission_id: &MissionId) -> Result<Option<String>, String> {
@@ -755,5 +871,28 @@ impl crate::ipc::IpcDispatcher for MissionService {
 
     fn touch_ui(&self) {
         self.touch_ui();
+    }
+}
+
+#[cfg(test)]
+mod continuity_tests {
+    use super::{MISSION_COMMANDS, MissionCommandRequest};
+
+    #[test]
+    fn recovery_command_and_request_fields_are_exposed() {
+        assert!(MISSION_COMMANDS.contains(&"build_recovery_package"));
+        let request: MissionCommandRequest = serde_json::from_value(serde_json::json!({
+            "missionId": "00000000-0000-0000-0000-000000000001",
+            "routeId": "00000000-0000-0000-0000-000000000002",
+            "checkpointId": "checkpoint-1",
+            "contractVersion": 1,
+            "ledgerSequence": 3,
+            "loadoutFingerprint": "loadout",
+            "contextPackHash": "context",
+            "pendingApprovalHash": "approval"
+        }))
+        .expect("request");
+        assert_eq!(request.checkpoint_id.as_deref(), Some("checkpoint-1"));
+        assert_eq!(request.context_pack_hash.as_deref(), Some("context"));
     }
 }

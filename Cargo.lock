@@ -2069,8 +2069,11 @@ name = "mission-memory"
 version = "0.1.0"
 dependencies = [
  "mission-domain",
+ "mission-ledger",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "thiserror 2.0.20",
 ]
 
@@ -2105,6 +2108,7 @@ dependencies = [
  "cc-switch-bridge",
  "mission-domain",
  "mission-ledger",
+ "mission-memory",
  "mission-policy",
  "mission-protocol",
  "serde",

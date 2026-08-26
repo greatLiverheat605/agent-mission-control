@@ -48,14 +48,15 @@ macro_rules! mission_commands {
             launch_route,
             subscribe_mission,
             request_safe_pause,
-            force_terminate
+            force_terminate,
+            build_recovery_package
         )
     };
 }
 #[allow(unused_imports)]
 pub(crate) use mission_commands;
 #[allow(dead_code)]
-pub const MISSION_ALLOWED_COMMANDS: [&str; 6] = mission_commands!(command_names);
+pub const MISSION_ALLOWED_COMMANDS: [&str; 7] = mission_commands!(command_names);
 
 #[allow(unused_imports)]
 pub use mission_supervisor::mission_service::{MissionCommandRequest, MissionCommandResult};
