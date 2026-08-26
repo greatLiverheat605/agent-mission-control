@@ -24,6 +24,30 @@ Thumbs.db
 .idea/
 .vscode/
 
-# Independent projects and local Codex state
+# Independent projects and local development state
 /MCP/
 /.codex/
+/.claude/
+/.cursor/
+/.windsurf/
+/.zcode/
+/.ai/
+
+# AI-assisted plans, prompts, handoffs, and review evidence
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+/PRODUCT_DIRECTION.md
+/plans/
+/prompts/
+/handoff/
+/evidence/
+/reports/
+/docs/design-system/
+/docs/superpowers/
+/docs/ai/
+/docs/plans/
+/docs/prompts/
+/docs/handoff/
+/docs/evidence/
+/docs/reports/
