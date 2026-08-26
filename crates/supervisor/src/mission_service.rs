@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use adapter_claude::{ClaudeAdapter, ClaudeAdapterOptions};
 use adapter_codex::CodexAdapter;
 use adapter_core::{
     AgentAdapter, AgentCapabilityReport, AgentHandle, LoadoutSnapshot, ProviderId,
@@ -38,6 +39,10 @@ pub struct MissionCommandRequest {
     pub goal: Option<String>,
     pub reason: Option<String>,
     pub confirmation_token: Option<String>,
+    #[serde(default)]
+    pub loadout_fingerprint: Option<String>,
+    #[serde(default)]
+    pub resume_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -78,6 +83,20 @@ pub fn validate_mission_request(request: &MissionCommandRequest) -> Result<(), &
     {
         return Err("CONFIRMATION_TOKEN_TOO_LONG");
     }
+    if request
+        .loadout_fingerprint
+        .as_ref()
+        .is_some_and(|value| value.len() > 512)
+    {
+        return Err("LOADOUT_FINGERPRINT_TOO_LONG");
+    }
+    if request
+        .resume_token
+        .as_ref()
+        .is_some_and(|value| value.len() > 4096)
+    {
+        return Err("RESUME_TOKEN_TOO_LONG");
+    }
     Ok(())
 }
 
@@ -86,7 +105,8 @@ type MissionActorState = crate::mission_actor::MissionActor<EncryptedLedger>;
 pub struct MissionService {
     missions: Arc<Mutex<HashMap<String, MissionActorState>>>,
     runs: Arc<Mutex<HashMap<String, String>>>,
-    codex: Arc<CodexAdapter>,
+    run_providers: Arc<Mutex<HashMap<String, ProviderId>>>,
+    adapters: Arc<HashMap<ProviderId, Arc<dyn AgentAdapter>>>,
     ledger_path: PathBuf,
     last_ui_seen: Mutex<Instant>,
     runtime: Runtime,
@@ -97,14 +117,23 @@ impl MissionService {
         let executable = std::env::var_os("MISSION_CODEX_EXECUTABLE")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("codex"));
+        let claude_executable = std::env::var_os("MISSION_CLAUDE_EXECUTABLE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("claude"));
         let runtime = Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(|error| format!("MISSION_RUNTIME_FAILED:{error}"))?;
+        let codex: Arc<dyn AgentAdapter> = Arc::new(CodexAdapter::new(executable));
+        let claude: Arc<dyn AgentAdapter> = Arc::new(ClaudeAdapter::new(
+            ClaudeAdapterOptions::new(claude_executable),
+        ));
+        let adapters = HashMap::from([(ProviderId::Codex, codex), (ProviderId::Claude, claude)]);
         let service = Arc::new(Self {
             missions: Arc::new(Mutex::new(HashMap::new())),
             runs: Arc::new(Mutex::new(HashMap::new())),
-            codex: Arc::new(CodexAdapter::new(executable)),
+            run_providers: Arc::new(Mutex::new(HashMap::new())),
+            adapters: Arc::new(adapters),
             ledger_path: data_dir.join("mission-ledger.db"),
             last_ui_seen: Mutex::new(Instant::now()),
             runtime,
@@ -194,7 +223,15 @@ impl MissionService {
         };
         for mission_id in mission_ids {
             if let Ok(Some(run_id)) = self.active_run_id_key(&mission_id) {
-                let _ = self.codex.request_safe_pause(&run_id).await;
+                let provider = self
+                    .run_providers
+                    .lock()
+                    .ok()
+                    .and_then(|providers| providers.get(&mission_id).copied())
+                    .unwrap_or_default();
+                if let Some(adapter) = self.adapters.get(&provider) {
+                    let _ = adapter.request_safe_pause(&run_id).await;
+                }
             }
         }
     }
@@ -369,27 +406,38 @@ impl MissionService {
         if self.active_run_id(&mission_id)?.is_some() {
             return Err("ROUTE_ALREADY_RUNNING".to_owned());
         }
-        if let Err(error) = self.launch_agent(mission_id, route_id, &request).await {
-            let mut missions = self
-                .missions
-                .lock()
-                .map_err(|_| "MISSION_STATE_POISONED".to_owned())?;
-            if let Some(actor) = missions.get_mut(&mission_id.to_string()) {
-                let _ = actor.record_event(
-                    EventKind::Unknown("adapter.start_failed".to_owned()),
-                    serde_json::json!({"error": error}),
-                );
-            }
-            return Err("CODEX_START_FAILED".to_owned());
-        }
+        let provider = request.provider.unwrap_or_default();
+        let (_, selected_provider, capability) =
+            match self.launch_agent(mission_id, route_id, &request).await {
+                Ok(value) => value,
+                Err(error) => {
+                    let mut missions = self
+                        .missions
+                        .lock()
+                        .map_err(|_| "MISSION_STATE_POISONED".to_owned())?;
+                    if let Some(actor) = missions.get_mut(&mission_id.to_string()) {
+                        let _ = actor.record_event(
+                            EventKind::Unknown("adapter.start_failed".to_owned()),
+                            serde_json::json!({"error": error}),
+                        );
+                    }
+                    return Err(format!(
+                        "{}_START_FAILED",
+                        provider.as_str().to_ascii_uppercase()
+                    ));
+                }
+            };
         let missions = self
             .missions
             .lock()
             .map_err(|_| "MISSION_STATE_POISONED".to_owned())?;
-        Self::result(
+        let mut result = Self::result(
             Some(mission_id.to_string()),
             missions.get(&mission_id.to_string()),
-        )
+        )?;
+        result.provider = Some(selected_provider);
+        result.capability = Some(capability);
+        Ok(result)
     }
 
     fn subscribe_mission(
@@ -451,7 +499,8 @@ impl MissionService {
             Self::result(Some(mission_id.to_string()), Some(actor))?
         };
         if let Some(run_id) = active_run {
-            self.codex
+            let provider = self.run_provider(&mission_id).unwrap_or_default();
+            self.adapter(provider)?
                 .request_safe_pause(&run_id)
                 .await
                 .map_err(|error| format!("SAFE_PAUSE_CONTROL_FAILED:{error}"))?;
@@ -479,7 +528,8 @@ impl MissionService {
             }
         }
         if let Some(run_id) = active_run {
-            self.codex
+            let provider = self.run_provider(&mission_id).unwrap_or_default();
+            self.adapter(provider)?
                 .terminate_owned_tree(&run_id)
                 .await
                 .map_err(|error| format!("FORCE_TERMINATE_CONTROL_FAILED:{error}"))?;
@@ -508,48 +558,111 @@ impl MissionService {
             .map(|runs| runs.get(mission_key).cloned())
     }
 
+    fn run_provider(&self, mission_id: &MissionId) -> Option<ProviderId> {
+        self.run_providers
+            .lock()
+            .ok()
+            .and_then(|providers| providers.get(&mission_id.to_string()).copied())
+    }
+
+    fn adapter(&self, provider: ProviderId) -> Result<Arc<dyn AgentAdapter>, String> {
+        self.adapters
+            .get(&provider)
+            .cloned()
+            .ok_or_else(|| format!("PROVIDER_UNAVAILABLE:{}", provider.as_str()))
+    }
+
     async fn launch_agent(
         &self,
         mission_id: MissionId,
         route_id: RouteId,
         request: &MissionCommandRequest,
-    ) -> Result<String, String> {
+    ) -> Result<(String, ProviderId, AgentCapabilityReport), String> {
         let project_root = request
             .project_root
             .clone()
             .ok_or_else(|| "PROJECT_ROOT_REQUIRED".to_owned())?;
+        let provider = request.provider.unwrap_or_default();
+        if request
+            .loadout
+            .as_ref()
+            .is_some_and(|loadout| loadout.provider != provider)
+        {
+            return Err("LOADOUT_PROVIDER_MISMATCH".to_owned());
+        }
+        let adapter = self.adapter(provider)?;
+        let capability = adapter
+            .probe()
+            .await
+            .map_err(|error| format!("PROVIDER_PROBE_FAILED:{error}"))?;
+        if !capability.is_available() {
+            return Err(format!(
+                "PROVIDER_UNAVAILABLE:{}",
+                capability
+                    .unavailable_reason
+                    .as_deref()
+                    .unwrap_or("capability unavailable")
+            ));
+        }
+        if request.resume_token.is_some() && !capability.capability.resume {
+            return Err("RESUME_UNSUPPORTED".to_owned());
+        }
+        let loadout_fingerprint = request
+            .loadout_fingerprint
+            .clone()
+            .or_else(|| {
+                request
+                    .loadout
+                    .as_ref()
+                    .map(|loadout| loadout.fingerprint_material().join("|"))
+            })
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "LOADOUT_FINGERPRINT_REQUIRED".to_owned())?;
         let start_request = StartAgentRequest {
-            provider: request.provider.unwrap_or_default(),
+            provider,
             mission_id,
             route_id,
             project_root: project_root.clone(),
             route_workspace: project_root,
             read_only: true,
             approved_environment: Vec::new(),
-            model: None,
-            loadout_fingerprint: "desktop-default".to_owned(),
-            resume_token: None,
+            model: request
+                .loadout
+                .as_ref()
+                .and_then(|loadout| loadout.model.clone()),
+            loadout_fingerprint,
+            resume_token: request.resume_token.clone(),
             loadout: request.loadout.clone(),
         };
         let (sink, _sink_rx) = mpsc::unbounded_channel();
-        let handle = self
-            .codex
-            .start(start_request, sink)
-            .await
-            .map_err(|error| format!("CODEX_START_FAILED:{error}"))?;
+        let handle = adapter.start(start_request, sink).await.map_err(|error| {
+            format!(
+                "{}_ADAPTER_START_FAILED:{error}",
+                provider.as_str().to_ascii_uppercase()
+            )
+        })?;
         let run_id = handle.run_id().to_owned();
         self.runs
             .lock()
             .map_err(|_| "MISSION_RUN_STATE_POISONED".to_owned())?
             .insert(mission_id.to_string(), run_id.clone());
-        self.spawn_event_consumer(mission_id, handle);
-        Ok(run_id)
+        self.run_providers
+            .lock()
+            .map_err(|_| "MISSION_RUN_PROVIDER_STATE_POISONED".to_owned())?
+            .insert(mission_id.to_string(), provider);
+        self.spawn_event_consumer(mission_id, handle, adapter);
+        Ok((run_id, provider, capability))
     }
 
-    fn spawn_event_consumer(&self, mission_id: MissionId, handle: AgentHandle) {
+    fn spawn_event_consumer(
+        &self,
+        mission_id: MissionId,
+        handle: AgentHandle,
+        adapter: Arc<dyn AgentAdapter>,
+    ) {
         let missions = Arc::clone(&self.missions);
         let runs = Arc::clone(&self.runs);
-        let codex = Arc::clone(&self.codex);
+        let run_providers = Arc::clone(&self.run_providers);
         let run_id = handle.run_id().to_owned();
         self.runtime.spawn(async move {
             while let Some(event) = handle.next_event().await {
@@ -574,7 +687,7 @@ impl MissionService {
                     break;
                 }
                 if adapter_pause {
-                    let _ = codex.request_safe_pause(&run_id).await;
+                    let _ = adapter.request_safe_pause(&run_id).await;
                 }
             }
             if let Ok(mut runs) = runs.lock()
@@ -583,6 +696,9 @@ impl MissionService {
                     .is_some_and(|active| active == &run_id)
             {
                 runs.remove(&mission_id.to_string());
+                if let Ok(mut providers) = run_providers.lock() {
+                    providers.remove(&mission_id.to_string());
+                }
             }
         });
     }

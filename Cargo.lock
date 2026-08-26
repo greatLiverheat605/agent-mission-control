@@ -7,10 +7,14 @@ name = "adapter-claude"
 version = "0.1.0"
 dependencies = [
  "adapter-core",
+ "async-trait",
  "mission-domain",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2074,6 +2078,7 @@ dependencies = [
 name = "mission-supervisor"
 version = "0.1.0"
 dependencies = [
+ "adapter-claude",
  "adapter-codex",
  "adapter-core",
  "mission-domain",

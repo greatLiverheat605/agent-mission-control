@@ -15,6 +15,7 @@ path = "src/bin/package_smoke_client.rs"
 test-credential-target = []
 
 [dependencies]
+adapter-claude = { path = "../adapter-claude" }
 adapter-codex = { path = "../adapter-codex" }
 adapter-core = { path = "../adapter-core" }
 mission-domain = { path = "../domain" }

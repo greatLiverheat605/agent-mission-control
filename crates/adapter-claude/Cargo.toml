@@ -5,10 +5,14 @@ edition.workspace = true
 
 [dependencies]
 adapter-core = { path = "../adapter-core" }
+async-trait.workspace = true
 mission-domain = { path = "../domain" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+windows-sys.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
