@@ -243,6 +243,9 @@ fn mission_allowlist_exposes_recovery_package_command() {
         "request_safe_pause",
         "force_terminate",
         "build_recovery_package",
+        "review_memory",
+        "handoff_provider",
+        "provider_capabilities",
     ];
 
     assert_eq!(

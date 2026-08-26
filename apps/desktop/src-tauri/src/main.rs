@@ -64,6 +64,9 @@ mission_command!(subscribe_mission);
 mission_command!(request_safe_pause);
 mission_command!(force_terminate);
 mission_command!(build_recovery_package);
+mission_command!(review_memory);
+mission_command!(handoff_provider);
+mission_command!(provider_capabilities);
 
 fn main() {
     debug_assert_eq!(ALLOWED_COMMANDS, ["supervisor_status", "ping_supervisor"]);
@@ -76,7 +79,10 @@ fn main() {
             "subscribe_mission",
             "request_safe_pause",
             "force_terminate",
-            "build_recovery_package"
+            "build_recovery_package",
+            "review_memory",
+            "handoff_provider",
+            "provider_capabilities"
         ]
     );
     tauri::Builder::default()
@@ -100,7 +106,10 @@ fn main() {
             subscribe_mission,
             request_safe_pause,
             force_terminate,
-            build_recovery_package
+            build_recovery_package,
+            review_memory,
+            handoff_provider,
+            provider_capabilities
         ))
         .run(tauri::generate_context!())
         .expect("run Agent Mission Control desktop");

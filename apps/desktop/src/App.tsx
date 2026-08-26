@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { BasicMissionFlight } from "./features/mission/BasicMissionFlight";
 import { NewMission, type MissionDraft } from "./features/onboarding/NewMission";
-import { emptyMission, reduceMission, type MissionEvent, type MissionReadModel } from "../../../packages/mission-store/src";
+import type { MemoryDecision } from "./features/memory";
+import type { RecoveryReviewManifest } from "./features/recovery";
+import { emptyMission, reduceMission, toFlightViewModel, type MissionEvent, type MissionReadModel } from "../../../packages/mission-store/src";
 import { useLocale } from "./i18n/LocaleProvider";
 
 export type SupervisorStatus = {
@@ -18,15 +20,29 @@ const supervisorApi = {
   launch: (request: MissionCommandRequest) => invoke<MissionCommandResult>("launch_route", { request }),
   subscribe: (request: MissionCommandRequest) => invoke<MissionCommandResult>("subscribe_mission", { request }),
   pause: (request: MissionCommandRequest) => invoke<MissionCommandResult>("request_safe_pause", { request }),
+  buildRecovery: (request: MissionCommandRequest) => invoke<MissionCommandResult>("build_recovery_package", { request }),
+  handoff: (request: MissionCommandRequest) => invoke<MissionCommandResult>("handoff_provider", { request }),
+  reviewMemory: (request: MissionCommandRequest) => invoke<MissionCommandResult>("review_memory", { request }),
 };
 
 type MissionCommandRequest = {
+  provider?: "codex" | "claude" | "opencode" | "zcode";
+  targetProvider?: "codex" | "claude" | "opencode" | "zcode";
   missionId?: string;
   routeId?: string;
   expectedVersion?: number;
   projectRoot?: string;
   goal?: string;
   reason?: string;
+  loadoutFingerprint?: string;
+  resumeToken?: string;
+  checkpointId?: string;
+  contractVersion?: number;
+  ledgerSequence?: number;
+  contextPackHash?: string;
+  pendingApprovalHash?: string;
+  memoryId?: string;
+  memoryDecision?: MemoryDecision;
 };
 
 type MissionCommandResult = {
@@ -36,6 +52,10 @@ type MissionCommandResult = {
   sequence: number | null;
   errorCode?: string | null;
   events: Array<Record<string, unknown>>;
+  capability?: Record<string, unknown> | null;
+  recoveryPackage?: Record<string, unknown> | null;
+  capabilities?: Array<Record<string, unknown>>;
+  ccSwitch?: Record<string, unknown> | null;
 };
 
 type ActiveMission = {
@@ -58,6 +78,10 @@ export default function App() {
   const [draft, setDraft] = useState<MissionDraft | null>(restored?.draft ?? null);
   const [missionId, setMissionId] = useState<string | null>(restored?.missionId ?? null);
   const [routeId, setRouteId] = useState<string | null>(restored?.routeId ?? null);
+  const [recoveryPackage, setRecoveryPackage] = useState<RecoveryReviewManifest | null>(null);
+  const [recoveryVerified, setRecoveryVerified] = useState(false);
+  const [recoveryBuilding, setRecoveryBuilding] = useState(false);
+  const [commandError, setCommandError] = useState<string | null>(null);
   const [mission, setMission] = useState(() => ({
     ...emptyMission(restored?.missionId ?? "local-mission"),
     lastSequence: restored?.lastSequence ?? 0,
@@ -103,6 +127,7 @@ export default function App() {
       window.clearInterval(heartbeat);
     };
   }, []);
+
 
   useEffect(() => {
     if (status?.connection !== "disconnected" || !missionId || mission.status !== "running" || disconnectPauseSent.current) return;
@@ -159,26 +184,41 @@ export default function App() {
   }, [draft, missionId, routeId, status?.connection]);
 
   const createMission = async (nextDraft: MissionDraft) => {
-    setDraft(nextDraft);
-    const created = await supervisorApi.create({ projectRoot: nextDraft.projectRoot, goal: nextDraft.goal });
-    if (!created.accepted || !created.missionId || !created.routeId) throw new Error(created.errorCode ?? "MISSION_CREATE_FAILED");
-    disconnectPauseSent.current = false;
-    setMissionId(created.missionId);
-    setRouteId(created.routeId);
-    lastSequence.current = created.sequence ?? 0;
-    const createdMission = { ...emptyMission(created.missionId), phase: "Contract review", status: "idle" as const, currentAction: "Read-only contract created", lastSequence: created.sequence ?? 0, events: toMissionEvents(created.events) };
-    saveActiveMission(activeMission(nextDraft, created.missionId, created.routeId, createdMission));
-    setMission(createdMission);
-    const launched = await supervisorApi.launch({ missionId: created.missionId, routeId: created.routeId, projectRoot: nextDraft.projectRoot });
-    const launchEvents = toMissionEvents(launched.events);
-    setMission((current) => {
-      const projected = projectMissionEvents(current, launchEvents);
-      const launchSequence = Math.max(projected.lastSequence, launched.sequence ?? 0);
-      const next = { ...projected, lastSequence: launchSequence };
-      lastSequence.current = launchSequence;
-      saveActiveMission(activeMission(nextDraft, created.missionId!, created.routeId!, next));
-      return next;
-    });
+    setCommandError(null);
+    try {
+      setDraft(nextDraft);
+      const provider = nextDraft.agent;
+      const created = await supervisorApi.create({ provider, projectRoot: nextDraft.projectRoot, goal: nextDraft.goal });
+      if (!created.accepted || !created.missionId || !created.routeId) throw new Error(created.errorCode ?? "MISSION_CREATE_FAILED");
+      disconnectPauseSent.current = false;
+      setMissionId(created.missionId);
+      setRouteId(created.routeId);
+      setRecoveryPackage(null);
+      setRecoveryVerified(false);
+      lastSequence.current = created.sequence ?? 0;
+      const createdMission = { ...emptyMission(created.missionId), phase: "Contract review", status: "idle" as const, currentAction: "Read-only contract created", lastSequence: created.sequence ?? 0, events: toMissionEvents(created.events) };
+      saveActiveMission(activeMission(nextDraft, created.missionId, created.routeId, createdMission));
+      setMission(createdMission);
+      const launched = await supervisorApi.launch({
+        provider,
+        missionId: created.missionId,
+        routeId: created.routeId,
+        projectRoot: nextDraft.projectRoot,
+        loadoutFingerprint: "desktop-default",
+      });
+      if (!launched.accepted) throw new Error(launched.errorCode ?? "ROUTE_LAUNCH_FAILED");
+      const launchEvents = toMissionEvents(launched.events);
+      setMission((current) => {
+        const projected = projectMissionEvents(current, launchEvents);
+        const launchSequence = Math.max(projected.lastSequence, launched.sequence ?? 0);
+        const next = { ...projected, lastSequence: launchSequence };
+        lastSequence.current = launchSequence;
+        saveActiveMission(activeMission(nextDraft, created.missionId!, created.routeId!, next));
+        return next;
+      });
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : String(error));
+    }
   };
 
   const discardRecovery = () => {
@@ -201,6 +241,88 @@ export default function App() {
     const sequence = result.sequence ?? currentSequence(events);
     lastSequence.current = sequence;
     setMission((current) => ({ ...current, phase: "Paused", status: "paused", currentAction: "Safe pause requested", reason: "user requested safe pause", lastSequence: sequence, events: mergeMissionEvents(current.events, events) }));
+  };
+
+  const buildRecovery = async (): Promise<RecoveryReviewManifest | null> => {
+    if (!missionId || !routeId) return null;
+    setRecoveryBuilding(true);
+    setCommandError(null);
+    try {
+      const flight = toFlightViewModel(mission);
+      const latest = (kind: string) => [...mission.events].reverse().find((event) => event.kind === kind)?.payload ?? {};
+      const loadout = latest("loadout_snapshot");
+      const context = latest("context_pack_built");
+      const approval = latest("approval_requested");
+      const result = await supervisorApi.buildRecovery({
+        missionId,
+        routeId,
+        checkpointId: stringPayload(latest("checkpoint_created"), "checkpoint_id") ?? `checkpoint-${mission.lastSequence}`,
+        contractVersion: numberPayload(latest("contract_updated"), "contract_version") ?? flight.contract.version,
+        ledgerSequence: mission.lastSequence,
+        loadoutFingerprint: stringPayload(loadout, "fingerprint") ?? "desktop-default",
+        contextPackHash: stringPayload(context, "hash") ?? "desktop-context",
+        pendingApprovalHash: stringPayload(approval, "pending_approval_hash"),
+      });
+      const manifest = recoveryManifestFromResult(result.recoveryPackage);
+      if (!manifest) throw new Error(result.errorCode ?? "RECOVERY_PACKAGE_MISSING");
+      setRecoveryPackage(manifest);
+      setRecoveryVerified(false);
+      return manifest;
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : String(error));
+      return null;
+    } finally {
+      setRecoveryBuilding(false);
+    }
+  };
+
+  const reviewMemory = async (memoryId: string, memoryDecision: MemoryDecision) => {
+    if (!missionId || !routeId) return;
+    setCommandError(null);
+    try {
+      const result = await supervisorApi.reviewMemory({ missionId, routeId, memoryId, memoryDecision, expectedVersion: mission.lastSequence });
+      const events = toMissionEvents(result.events);
+      setMission((current) => {
+        const next = projectMissionEvents(current, events);
+        lastSequence.current = Math.max(next.lastSequence, result.sequence ?? 0);
+        return { ...next, lastSequence: lastSequence.current };
+      });
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const handoffProvider = async (targetProvider: "codex" | "claude") => {
+    if (!missionId || !routeId) return;
+    setCommandError(null);
+    try {
+      const manifest = recoveryPackage ?? await buildRecovery();
+      if (!manifest) return;
+      const result = await supervisorApi.handoff({
+        missionId,
+        routeId,
+        targetProvider,
+        contextPackHash: manifest.contextPackHash,
+        pendingApprovalHash: manifest.pendingApprovalHash ?? undefined,
+      });
+      if (!result.accepted) throw new Error(result.errorCode ?? "HANDOFF_FAILED");
+      const events = toMissionEvents(result.events);
+      setMission((current) => {
+        const next = projectMissionEvents(current, events);
+        lastSequence.current = Math.max(next.lastSequence, result.sequence ?? 0);
+        return { ...next, lastSequence: lastSequence.current };
+      });
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const verifyRecovery = () => {
+    if (recoveryPackage) setRecoveryVerified(true);
+  };
+
+  const resumeRecovery = () => {
+    if (recoveryVerified) reconnectRecovery();
   };
 
   let message = t("app.connecting");
@@ -227,7 +349,16 @@ export default function App() {
       onPause={state === "connected" && missionId ? () => { void pauseMission(); } : undefined}
       onReconnect={reconnectRecovery}
       onDiscard={discardRecovery}
+      recoveryPackage={recoveryPackage}
+      recoveryVerified={recoveryVerified}
+      recoveryBuilding={recoveryBuilding}
+      onBuildRecovery={() => { void buildRecovery(); }}
+      onVerifyRecovery={verifyRecovery}
+      onResumeRecovery={resumeRecovery}
+      onMemoryDecision={(id, decision) => { void reviewMemory(id, decision); }}
+      onHandoff={(provider) => { void handoffProvider(provider); }}
     /></div>
+    {commandError && <div className="supervisor-command-error" role="alert">{commandError}</div>}
   </>;
 }
 
@@ -239,6 +370,35 @@ function ConnectionDisplay({ message, state }: { message: string; state: "connec
     <h1>{message}</h1>
     <p>{state === "connecting" ? t("new.uplinkReady") : t("systems.recovery")}</p>
   </section>;
+}
+
+function stringPayload(payload: Record<string, unknown>, key: string): string | undefined {
+  const value = payload[key] ?? payload[key.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase())];
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function numberPayload(payload: Record<string, unknown>, key: string): number | undefined {
+  const value = payload[key] ?? payload[key.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase())];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function recoveryManifestFromResult(value: Record<string, unknown> | null | undefined): RecoveryReviewManifest | null {
+  const manifest = value && typeof value.manifest === "object" && value.manifest !== null ? value.manifest as Record<string, unknown> : null;
+  if (!manifest) return null;
+  const stringField = (snake: string) => stringPayload(manifest, snake);
+  const numberField = (snake: string) => numberPayload(manifest, snake);
+  const missionId = stringField("mission_id");
+  const routeId = stringField("route_id");
+  const checkpointId = stringField("checkpoint_id");
+  const loadoutFingerprint = stringField("loadout_fingerprint");
+  const contextPackHash = stringField("context_pack_hash");
+  const entryHash = stringField("entry_hash");
+  const schemaVersion = numberField("schema_version");
+  const contractVersion = numberField("contract_version");
+  const ledgerSequence = numberField("ledger_sequence");
+  if (!missionId || !routeId || !checkpointId || !loadoutFingerprint || !contextPackHash || !entryHash || schemaVersion == null || contractVersion == null || ledgerSequence == null) return null;
+  const pendingApprovalHash = stringField("pending_approval_hash") ?? null;
+  return { missionId, routeId, schemaVersion, contractVersion, checkpointId, ledgerSequence, loadoutFingerprint, contextPackHash, pendingApprovalHash, entryHash };
 }
 
 function toMissionEvents(events: Array<Record<string, unknown>>): MissionEvent[] {

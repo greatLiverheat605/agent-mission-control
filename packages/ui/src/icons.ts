@@ -21,6 +21,7 @@ export {
   Navigation,
   OctagonX,
   Orbit,
+  PackageCheck,
   PanelLeftOpen,
   PanelRightOpen,
   Pause,

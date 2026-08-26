@@ -1,4 +1,4 @@
-import { Check, CircleAlert, RotateCcw, X } from "@mission-control/ui";
+import { Check, CircleAlert, PackageCheck, RotateCcw, X } from "@mission-control/ui";
 import { useLocale } from "../../i18n/LocaleProvider";
 
 import "../continuity.css";
@@ -23,9 +23,11 @@ type RecoveryReviewPanelProps = {
   onVerify?: () => void;
   onResume?: () => void;
   onDiscard?: () => void;
+  onBuild?: () => void;
+  building?: boolean;
 };
 
-export function RecoveryReviewPanel({ manifest, verified = false, verifying = false, onVerify, onResume, onDiscard }: RecoveryReviewPanelProps) {
+export function RecoveryReviewPanel({ manifest, verified = false, verifying = false, onVerify, onResume, onDiscard, onBuild, building = false }: RecoveryReviewPanelProps) {
   const { t } = useLocale();
   return (
     <section className="orbit-panel continuity-panel recovery-review-panel" aria-labelledby="recovery-review-title">
@@ -49,15 +51,18 @@ export function RecoveryReviewPanel({ manifest, verified = false, verifying = fa
         <div><dt>{t("recovery.entry")}</dt><dd>{manifest.entryHash}</dd></div>
       </dl>
       <div className="continuity-actions">
+        {onBuild && <button type="button" disabled={building} onClick={onBuild}>
+          <PackageCheck aria-hidden="true" size={15} />{building ? t("recovery.buildPending") : t("recovery.build")}
+        </button>}
         <button type="button" disabled={!onVerify || verifying || verified} onClick={onVerify}>
           <RotateCcw aria-hidden="true" size={15} />{verifying ? t("recovery.verifyPending") : t("recovery.verify")}
         </button>
         <button type="button" disabled={!onResume || !verified} onClick={onResume}>
           <Check aria-hidden="true" size={15} />{t("recovery.resumeVerified")}
         </button>
-        <button type="button" className="danger-command" disabled={!onDiscard} onClick={onDiscard}>
+        {onDiscard && <button type="button" className="danger-command" onClick={onDiscard}>
           <X aria-hidden="true" size={15} />{t("recovery.discard")}
-        </button>
+        </button>}
       </div>
     </section>
   );

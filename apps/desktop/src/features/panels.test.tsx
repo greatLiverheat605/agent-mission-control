@@ -86,4 +86,19 @@ describe("mission edge surfaces", () => {
     expect(authority.getByText("Install dependency")).toBeTruthy();
     expect((authority.getByRole("button", { name: "Approve once" }) as HTMLButtonElement).disabled).toBe(true);
   });
+
+  it("uses continuity event metadata in the recovery review", () => {
+    const events: MissionEvent[] = [
+      { missionId: "mission-continuity", sequence: 1, kind: "mission_created", payload: { goal: "Resume safely", contract_version: 6, route_id: "route-continuity" }, source: "supervisor" },
+      { missionId: "mission-continuity", sequence: 2, kind: "loadout_snapshot", payload: { provider: "Codex", model: "gpt-5", fingerprint: "fixture-loadout-v1" }, source: "supervisor" },
+      { missionId: "mission-continuity", sequence: 3, kind: "context_pack_built", payload: { hash: "fixture-context-v1" }, source: "supervisor" },
+      { missionId: "mission-continuity", sequence: 4, kind: "checkpoint_created", payload: { checkpoint_id: "checkpoint-continuity-1" }, source: "supervisor" },
+    ];
+    const mission = { ...emptyMission("mission-continuity"), phase: "Execute", status: "running" as const, currentAction: "Review recovery", events };
+    render(<BasicMissionFlight mission={mission} events={events} initialView="systems" onReconnect={vi.fn()} onDiscard={vi.fn()} />);
+
+    expect(screen.getByText("fixture-context-v1")).toBeTruthy();
+    expect(screen.getByText("checkpoint-continuity-1")).toBeTruthy();
+    expect(screen.getByText("fixture-loadout-v1")).toBeTruthy();
+  });
 });

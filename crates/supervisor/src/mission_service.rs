@@ -6,9 +6,10 @@ use std::time::{Duration, Instant};
 use adapter_claude::{ClaudeAdapter, ClaudeAdapterOptions};
 use adapter_codex::CodexAdapter;
 use adapter_core::{
-    AgentAdapter, AgentCapabilityReport, AgentHandle, LoadoutSnapshot, ProviderId,
-    StartAgentRequest,
+    AgentAdapter, AgentCapabilityReport, AgentHandle, Capability, InstallState, LoadoutSnapshot,
+    ProviderId, StartAgentRequest,
 };
+use cc_switch_bridge::CcSwitchBridge;
 use mission_domain::{EventKind, MissionId, RouteId};
 use mission_ledger::{EncryptedBlobStore, EncryptedLedger, KeyStore, WindowsCredentialKeyStore};
 use mission_memory::{RecoveryInput, build_recovery_package};
@@ -17,7 +18,7 @@ use serde_json::Value;
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::mpsc;
 
-pub const MISSION_COMMANDS: [&str; 7] = [
+pub const MISSION_COMMANDS: [&str; 10] = [
     "create_mission",
     "update_mission_contract",
     "launch_route",
@@ -25,6 +26,9 @@ pub const MISSION_COMMANDS: [&str; 7] = [
     "request_safe_pause",
     "force_terminate",
     "build_recovery_package",
+    "review_memory",
+    "handoff_provider",
+    "provider_capabilities",
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -32,6 +36,8 @@ pub const MISSION_COMMANDS: [&str; 7] = [
 pub struct MissionCommandRequest {
     #[serde(default)]
     pub provider: Option<ProviderId>,
+    #[serde(default)]
+    pub target_provider: Option<ProviderId>,
     #[serde(default)]
     pub loadout: Option<LoadoutSnapshot>,
     pub mission_id: Option<String>,
@@ -55,6 +61,10 @@ pub struct MissionCommandRequest {
     pub context_pack_hash: Option<String>,
     #[serde(default)]
     pub pending_approval_hash: Option<String>,
+    #[serde(default)]
+    pub memory_id: Option<String>,
+    #[serde(default)]
+    pub memory_decision: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -73,6 +83,10 @@ pub struct MissionCommandResult {
     pub events: Vec<Value>,
     #[serde(default)]
     pub recovery_package: Option<Value>,
+    #[serde(default)]
+    pub capabilities: Vec<AgentCapabilityReport>,
+    #[serde(default)]
+    pub cc_switch: Option<Value>,
 }
 
 pub fn validate_mission_request(request: &MissionCommandRequest) -> Result<(), &'static str> {
@@ -276,6 +290,9 @@ impl MissionService {
             "request_safe_pause" => self.request_safe_pause(request).await,
             "force_terminate" => self.force_terminate(request).await,
             "build_recovery_package" => self.build_recovery_package(request),
+            "review_memory" => self.review_memory(request),
+            "handoff_provider" => self.handoff_provider(request).await,
+            "provider_capabilities" => self.provider_capabilities().await,
             _ => Err("COMMAND_NOT_ALLOWED".to_owned()),
         }
     }
@@ -332,6 +349,8 @@ impl MissionService {
             capability: None,
             events,
             recovery_package: None,
+            capabilities: Vec::new(),
+            cc_switch: None,
         })
     }
 
@@ -492,6 +511,8 @@ impl MissionService {
             capability: None,
             events,
             recovery_package: None,
+            capabilities: Vec::new(),
+            cc_switch: None,
         })
     }
 
@@ -662,6 +683,259 @@ impl MissionService {
             serde_json::to_value(package)
                 .map_err(|_| "RECOVERY_RESULT_SERIALIZE_FAILED".to_owned())?,
         );
+        Ok(result)
+    }
+
+    fn review_memory(
+        &self,
+        request: MissionCommandRequest,
+    ) -> Result<MissionCommandResult, String> {
+        let mission_id = Self::mission_id(&request)?;
+        let memory_id = request.memory_id.ok_or("MEMORY_ID_REQUIRED")?;
+        let decision = request
+            .memory_decision
+            .as_deref()
+            .ok_or("MEMORY_DECISION_REQUIRED")?;
+        let status = match decision {
+            "confirm" => "confirmed",
+            "reject" => "rejected",
+            "defer" => "deferred",
+            _ => return Err("MEMORY_DECISION_INVALID".to_owned()),
+        };
+        let mut missions = self
+            .missions
+            .lock()
+            .map_err(|_| "MISSION_STATE_POISONED".to_owned())?;
+        let actor = missions
+            .get_mut(&mission_id.to_string())
+            .ok_or("MISSION_NOT_FOUND")?;
+        if request
+            .expected_version
+            .is_some_and(|expected| expected != actor.sequence())
+        {
+            return Err("MISSION_VERSION_CONFLICT".to_owned());
+        }
+        let mut item = actor
+            .replay_after(0)
+            .into_iter()
+            .rev()
+            .find_map(|event| {
+                (event.kind == EventKind::MemoryItemChanged)
+                    .then(|| event.payload.get("item").cloned())
+                    .flatten()
+                    .filter(|candidate| {
+                        candidate.get("id").and_then(Value::as_str) == Some(memory_id.as_str())
+                    })
+            })
+            .ok_or("MEMORY_NOT_FOUND")?;
+        if item.get("kind").and_then(Value::as_str) == Some("inference") && status == "confirmed" {
+            return Err("MEMORY_INFERENCE_CANNOT_CONFIRM".to_owned());
+        }
+        let object = item.as_object_mut().ok_or("MEMORY_ITEM_INVALID")?;
+        object.insert("status".to_owned(), Value::String(status.to_owned()));
+        object.insert("author".to_owned(), Value::String("user".to_owned()));
+        actor
+            .record_event(
+                EventKind::MemoryItemChanged,
+                serde_json::json!({"action": decision, "item": item}),
+            )
+            .map_err(|error| format!("MEMORY_REVIEW_FAILED:{error:?}"))?;
+        Self::result(Some(mission_id.to_string()), Some(actor))
+    }
+
+    async fn provider_capabilities(&self) -> Result<MissionCommandResult, String> {
+        let mut capabilities = Vec::with_capacity(ProviderId::ALL.len());
+        for provider in ProviderId::ALL {
+            let capability = match self.adapters.get(&provider) {
+                Some(adapter) => match adapter.probe().await {
+                    Ok(report) => report,
+                    Err(error) => unavailable_capability(provider, error.to_string()),
+                },
+                None => unavailable_capability(provider, "runtime adapter is not installed"),
+            };
+            capabilities.push(capability);
+        }
+        let cc_switch = if let Some(endpoint) = std::env::var_os("MISSION_CC_SWITCH_ENDPOINT") {
+            let endpoint = endpoint.to_string_lossy().into_owned();
+            match CcSwitchBridge::new(endpoint) {
+                Ok(bridge) => match bridge.health().await {
+                    Ok(health) => serde_json::json!({
+                        "available": health.ok,
+                        "version": health.version,
+                        "endpoint": "loopback",
+                    }),
+                    Err(error) => serde_json::json!({
+                        "available": false,
+                        "unavailableReason": error.to_string(),
+                        "endpoint": "loopback",
+                    }),
+                },
+                Err(error) => serde_json::json!({
+                    "available": false,
+                    "unavailableReason": error.to_string(),
+                    "endpoint": "rejected",
+                }),
+            }
+        } else {
+            serde_json::json!({
+                "available": false,
+                "unavailableReason": "CC Switch endpoint is not configured",
+                "endpoint": "not-configured",
+            })
+        };
+        Ok(MissionCommandResult {
+            accepted: true,
+            mission_id: None,
+            route_id: None,
+            sequence: None,
+            error_code: None,
+            provider: None,
+            capability: None,
+            events: Vec::new(),
+            recovery_package: None,
+            capabilities,
+            cc_switch: Some(cc_switch),
+        })
+    }
+
+    async fn handoff_provider(
+        &self,
+        request: MissionCommandRequest,
+    ) -> Result<MissionCommandResult, String> {
+        let mission_id = Self::mission_id(&request)?;
+        let route_id = Self::route_id(&request)?;
+        let target = request
+            .target_provider
+            .or(request.provider)
+            .ok_or("PROVIDER_NOT_SELECTED")?;
+        let context_pack_hash = request
+            .context_pack_hash
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or("CONTEXT_PACK_HASH_REQUIRED")?;
+        let (project_root, current_provider, loadout_fingerprint) = {
+            let missions = self
+                .missions
+                .lock()
+                .map_err(|_| "MISSION_STATE_POISONED".to_owned())?;
+            let actor = missions
+                .get(&mission_id.to_string())
+                .ok_or("MISSION_NOT_FOUND")?;
+            let events = actor.replay_after(0);
+            if events
+                .first()
+                .is_none_or(|event| event.route_id != route_id)
+            {
+                return Err("ROUTE_MISMATCH".to_owned());
+            }
+            let project_root = events
+                .iter()
+                .find(|event| event.kind == EventKind::MissionCreated)
+                .and_then(|event| event.payload.get("project_root"))
+                .and_then(Value::as_str)
+                .ok_or("PROJECT_ROOT_REQUIRED")?
+                .to_owned();
+            let current_provider = self
+                .run_provider(&mission_id)
+                .or_else(|| {
+                    events
+                        .iter()
+                        .rev()
+                        .find(|event| event.kind.as_str() == "loadout_snapshot")
+                        .and_then(|event| event.payload.get("provider"))
+                        .and_then(Value::as_str)
+                        .and_then(|value| value.parse().ok())
+                })
+                .unwrap_or_default();
+            let loadout_fingerprint = events
+                .iter()
+                .rev()
+                .find(|event| event.kind.as_str() == "loadout_snapshot")
+                .and_then(|event| event.payload.get("fingerprint"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("handoff-{context_pack_hash}"));
+            (project_root, current_provider, loadout_fingerprint)
+        };
+        if current_provider == target {
+            return Err("HANDOFF_PROVIDER_UNCHANGED".to_owned());
+        }
+        if self.active_run_id(&mission_id)?.is_some() {
+            let _ = self
+                .request_safe_pause(MissionCommandRequest {
+                    provider: Some(current_provider),
+                    target_provider: None,
+                    loadout: None,
+                    mission_id: Some(mission_id.to_string()),
+                    route_id: Some(route_id.to_string()),
+                    expected_version: None,
+                    project_root: None,
+                    goal: None,
+                    reason: Some("provider handoff requested".to_owned()),
+                    confirmation_token: None,
+                    loadout_fingerprint: None,
+                    resume_token: None,
+                    checkpoint_id: None,
+                    contract_version: None,
+                    ledger_sequence: None,
+                    context_pack_hash: None,
+                    pending_approval_hash: None,
+                    memory_id: None,
+                    memory_decision: None,
+                })
+                .await;
+            return Err("HANDOFF_REQUIRES_PAUSED_RUN".to_owned());
+        }
+        {
+            let mut missions = self
+                .missions
+                .lock()
+                .map_err(|_| "MISSION_STATE_POISONED".to_owned())?;
+            let actor = missions
+                .get_mut(&mission_id.to_string())
+                .ok_or("MISSION_NOT_FOUND")?;
+            actor
+                .record_event(
+                    EventKind::Unknown("provider_handoff_requested".to_owned()),
+                    serde_json::json!({"target_provider": target, "context_pack_hash": context_pack_hash}),
+                )
+                .map_err(|error| format!("HANDOFF_RECORD_FAILED:{error:?}"))?;
+        }
+        let launch_request = MissionCommandRequest {
+            provider: Some(target),
+            target_provider: None,
+            loadout: None,
+            mission_id: Some(mission_id.to_string()),
+            route_id: Some(route_id.to_string()),
+            expected_version: None,
+            project_root: Some(project_root),
+            goal: None,
+            reason: None,
+            confirmation_token: None,
+            loadout_fingerprint: Some(loadout_fingerprint),
+            resume_token: None,
+            checkpoint_id: None,
+            contract_version: None,
+            ledger_sequence: None,
+            context_pack_hash: Some(context_pack_hash),
+            pending_approval_hash: request.pending_approval_hash,
+            memory_id: None,
+            memory_decision: None,
+        };
+        let (_, selected_provider, capability) = self
+            .launch_agent(mission_id, route_id, &launch_request)
+            .await?;
+        let missions = self
+            .missions
+            .lock()
+            .map_err(|_| "MISSION_STATE_POISONED".to_owned())?;
+        let mut result = Self::result(
+            Some(mission_id.to_string()),
+            missions.get(&mission_id.to_string()),
+        )?;
+        result.provider = Some(selected_provider);
+        result.capability = Some(capability);
         Ok(result)
     }
 
@@ -871,6 +1145,28 @@ impl crate::ipc::IpcDispatcher for MissionService {
 
     fn touch_ui(&self) {
         self.touch_ui();
+    }
+}
+
+fn unavailable_capability(
+    provider: ProviderId,
+    reason: impl Into<String>,
+) -> AgentCapabilityReport {
+    AgentCapabilityReport {
+        provider,
+        agent: provider.as_str().to_owned(),
+        version: None,
+        install_state: InstallState::DetectedNotRunnable,
+        capability: Capability {
+            structured_events: false,
+            resume: false,
+            approval: false,
+            safe_pause: false,
+            terminal_fallback: false,
+        },
+        unavailable_reason: Some(reason.into()),
+        executable_hash: None,
+        configuration_source: None,
     }
 }
 

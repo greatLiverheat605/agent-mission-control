@@ -23,6 +23,9 @@ import { ContractOrbit } from "../contract/ContractOrbit";
 import { EvidenceBay } from "../evidence/EvidenceBay";
 import { ProjectOrbit } from "../galaxy/ProjectOrbit";
 import { LoadoutPanel } from "../loadout/LoadoutPanel";
+import { MemoryReviewPanel, type MemoryDecision, type MemoryReviewItem } from "../memory";
+import { RecallInspector, type RecallEvidence } from "../memory";
+import { RecoveryReviewPanel, type RecoveryReviewManifest } from "../recovery";
 import { EmergencyPause } from "./EmergencyPause";
 import { EventEvidence } from "./EventEvidence";
 import { LocaleSwitcher, useLocale } from "../../i18n/LocaleProvider";
@@ -41,9 +44,17 @@ type BasicMissionFlightProps = {
   connectionState?: "connected" | "connecting" | "disconnected";
   onForceTerminate?: () => void;
   displayOverride?: ReactNode;
+  recoveryPackage?: RecoveryReviewManifest | null;
+  recoveryVerified?: boolean;
+  recoveryBuilding?: boolean;
+  onBuildRecovery?: () => void;
+  onVerifyRecovery?: () => void;
+  onResumeRecovery?: () => void;
+  onMemoryDecision?: (id: string, decision: MemoryDecision) => void;
+  onHandoff?: (provider: "codex" | "claude") => void;
 };
 
-export function BasicMissionFlight({ mission, events, initialView = "nav", forceSceneFallback = false, forceReducedMotion, onPause, onReconnect, onDiscard, onNewMission, connectionState, onForceTerminate, displayOverride }: BasicMissionFlightProps) {
+export function BasicMissionFlight({ mission, events, initialView = "nav", forceSceneFallback = false, forceReducedMotion, onPause, onReconnect, onDiscard, onNewMission, connectionState, onForceTerminate, displayOverride, recoveryPackage = null, recoveryVerified = false, recoveryBuilding = false, onBuildRecovery, onVerifyRecovery, onResumeRecovery, onMemoryDecision, onHandoff }: BasicMissionFlightProps) {
   const { t } = useLocale();
   const recovering = mission.status === "paused" && mission.reason?.toLowerCase().includes("ui disconnected");
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -56,6 +67,9 @@ export function BasicMissionFlight({ mission, events, initialView = "nav", force
   const detectedReducedMotion = useReducedMotion();
   const reducedMotion = forceReducedMotion ?? detectedReducedMotion;
   const flight = toFlightViewModel({ ...mission, events });
+  const memoryItems = memoryItemsFromEvents(events);
+  const recallEvidence = memoryItems.filter((item) => item.status === "confirmed").map(recallEvidenceFromMemory);
+  const recoveryManifest = recoveryPackage ?? placeholderRecoveryManifest(mission, flight, events);
   const profile = performanceProfile(performanceMode === "adaptive" ? adaptiveLevel : performanceMode);
   const openPalette = useCallback(() => setPaletteOpen(true), []);
   useEffect(() => { if (recovering) setActiveView("systems"); }, [recovering]);
@@ -108,8 +122,8 @@ export function BasicMissionFlight({ mission, events, initialView = "nav", force
     sector: <CockpitViewFrame view="sector"><ProjectOrbit missions={projectMissions} selectedId={flight.mission.id} /></CockpitViewFrame>,
     mission: <CockpitViewFrame view="mission"><div className="cockpit-view-grid"><ContractOrbit flight={flight} /><BudgetTelemetry budget={flight.budget} /></div></CockpitViewFrame>,
     records: <CockpitViewFrame view="records"><EvidenceBay batches={flight.evidenceBatches} /></CockpitViewFrame>,
-    systems: <CockpitViewFrame view="systems"><div className="cockpit-view-grid"><LoadoutPanel loadout={flight.loadout} /><section className="orbit-panel systems-console" aria-labelledby="systems-console-title"><header className="panel-heading"><span className="panel-kicker">{t("systems.vessel")}</span><h2 id="systems-console-title">{t("systems.renderRecovery")}</h2></header><VisualPerformance value={performanceMode} fallback={sceneUnavailable} reducedMotion={reducedMotion} onChange={(mode) => { setPerformanceMode(mode); if (mode === "adaptive") setAdaptiveLevel(adaptivePerformance.level); }} />{recovering ? <RecoveryActions reason={mission.reason} onReconnect={onReconnect} onDiscard={onDiscard} /> : <AlertStrip title={t("systems.recovery")} tone="verified">{t("systems.noRecovery")}</AlertStrip>}</section></div></CockpitViewFrame>,
-    authority: <CockpitViewFrame view="authority"><div className="cockpit-view-grid"><ContractOrbit flight={flight} />{flight.pendingApprovals.length ? <ApprovalDock approvals={flight.pendingApprovals} /> : <section className="orbit-panel"><AlertStrip title={t("authority.clear")} tone="verified">{t("authority.none")}</AlertStrip></section>}</div></CockpitViewFrame>,
+    systems: <CockpitViewFrame view="systems"><div className="cockpit-view-grid"><LoadoutPanel loadout={flight.loadout} /><section className="orbit-panel systems-console" aria-labelledby="systems-console-title"><header className="panel-heading"><span className="panel-kicker">{t("systems.vessel")}</span><h2 id="systems-console-title">{t("systems.renderRecovery")}</h2></header><VisualPerformance value={performanceMode} fallback={sceneUnavailable} reducedMotion={reducedMotion} onChange={(mode) => { setPerformanceMode(mode); if (mode === "adaptive") setAdaptiveLevel(adaptivePerformance.level); }} />{recovering ? <RecoveryActions reason={mission.reason} onReconnect={onReconnect} onDiscard={onDiscard} /> : <AlertStrip title={t("systems.recovery")} tone="verified">{t("systems.noRecovery")}</AlertStrip>}</section><MemoryReviewPanel items={memoryItems} onDecision={onMemoryDecision} /><RecallInspector evidence={recallEvidence} /><RecoveryReviewPanel manifest={recoveryManifest} verified={recoveryVerified} onBuild={onBuildRecovery} building={recoveryBuilding} onVerify={onVerifyRecovery} onResume={onResumeRecovery} onDiscard={recovering ? undefined : onDiscard} /></div></CockpitViewFrame>,
+    authority: <CockpitViewFrame view="authority"><div className="cockpit-view-grid"><ContractOrbit flight={flight} /><ProviderHandoffPanel currentProvider={flight.loadout.provider} onHandoff={onHandoff} />{flight.pendingApprovals.length ? <ApprovalDock approvals={flight.pendingApprovals} /> : <section className="orbit-panel"><AlertStrip title={t("authority.clear")} tone="verified">{t("authority.none")}</AlertStrip></section>}</div></CockpitViewFrame>,
   } satisfies Record<CockpitViewId, ReactNode>;
   const effectiveView = recovering ? "systems" : activeView;
   const activeDisplay = displayOverride ?? viewDisplays[effectiveView];
@@ -269,4 +283,103 @@ function RecoveryActions({ reason, onReconnect, onDiscard }: { reason: string | 
     {reason && <p>{reason}</p>}
     <div><button type="button" onClick={onReconnect}>{t("recovery.reconnect")}</button><button type="button" disabled>{t("recovery.restart")}</button><button type="button" disabled>{t("recovery.resume")}</button><button type="button" onClick={onDiscard}>{t("recovery.discard")}</button></div>
   </section>;
+}
+
+function ProviderHandoffPanel({ currentProvider, onHandoff }: { currentProvider: string; onHandoff?: (provider: "codex" | "claude") => void }) {
+  const { t } = useLocale();
+  const normalized = currentProvider.toLowerCase();
+  const initialTarget: "codex" | "claude" = normalized === "claude" ? "codex" : "claude";
+  const [target, setTarget] = useState<"codex" | "claude">(initialTarget);
+  const [confirming, setConfirming] = useState(false);
+  const submit = () => {
+    if (!onHandoff) return;
+    if (!confirming) {
+      setConfirming(true);
+      return;
+    }
+    setConfirming(false);
+    onHandoff(target);
+  };
+  return <section className="orbit-panel continuity-panel handoff-panel" aria-labelledby="handoff-title">
+    <header className="panel-heading"><span className="panel-kicker">{t("handoff.kicker")}</span><h2 id="handoff-title">{t("handoff.title")}</h2></header>
+    <p className="continuity-notice">{t("handoff.note")}</p>
+    <label className="handoff-target">{t("handoff.target")}<select value={target} onChange={(event) => { setTarget(event.target.value as "codex" | "claude"); setConfirming(false); }} disabled={!onHandoff}><option value="codex">Codex</option><option value="claude">Claude</option></select></label>
+    <div className="continuity-actions"><button type="button" disabled={!onHandoff || target === normalized} onClick={submit}>{confirming ? t("handoff.confirm") : t("handoff.prepare")}</button>{confirming && <button type="button" onClick={() => setConfirming(false)}>{t("handoff.cancel")}</button>}</div>
+  </section>;
+}
+
+function memoryItemsFromEvents(events: MissionEvent[]): MemoryReviewItem[] {
+  const latest = new Map<string, MemoryReviewItem>();
+  for (const event of events) {
+    if (event.kind !== "memory_item_changed") continue;
+    const item = objectValue(event.payload.item);
+    const id = stringValue(item.id) ?? `memory-${event.sequence}`;
+    latest.set(id, {
+      id,
+      kind: stringValue(item.kind) ?? "fact",
+      content: stringValue(item.content) ?? stringValue(event.payload.summary) ?? event.kind,
+      sourceEventIds: stringArray(item.source_event_ids ?? item.sourceEventIds, [String(event.sequence)]),
+      scope: stringValue(item.scope) ?? "route",
+      freshness: stringValue(item.freshness) ?? "unknown",
+      version: numberValue(item.version) ?? 1,
+      status: memoryStatus(item.status),
+      author: stringValue(item.author) ?? event.source ?? "system",
+    });
+  }
+  return [...latest.values()].sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function recallEvidenceFromMemory(item: MemoryReviewItem): RecallEvidence {
+  return {
+    id: item.id,
+    content: item.content,
+    sourceEventIds: item.sourceEventIds,
+    scope: item.scope,
+    freshness: item.freshness,
+    version: item.version,
+  };
+}
+
+function placeholderRecoveryManifest(mission: MissionReadModel, flight: ReturnType<typeof toFlightViewModel>, events: MissionEvent[]): RecoveryReviewManifest {
+  const sequence = mission.lastSequence;
+  const latest = (...kinds: string[]) => [...events].reverse().find((event) => kinds.includes(event.kind))?.payload ?? {};
+  const loadout = latest("loadout_snapshot");
+  const context = latest("context_pack_built");
+  const checkpoint = latest("checkpoint_created");
+  const contract = latest("contract_updated", "mission_created");
+  return {
+    missionId: mission.missionId,
+    routeId: flight.primaryRoute.id,
+    schemaVersion: 1,
+    contractVersion: numberValue(contract.contract_version ?? contract.contractVersion) ?? flight.contract.version,
+    checkpointId: stringValue(checkpoint.checkpoint_id ?? checkpoint.checkpointId) ?? `checkpoint-${sequence}`,
+    ledgerSequence: sequence,
+    loadoutFingerprint: stringValue(loadout.fingerprint) ?? flight.loadout.change?.next ?? "not-built",
+    contextPackHash: stringValue(context.hash) ?? "not-built",
+    pendingApprovalHash: null,
+    entryHash: "not-built",
+  };
+}
+
+function memoryStatus(value: unknown): MemoryReviewItem["status"] {
+  if (value === "confirmed") return "confirmed";
+  if (value === "rejected") return "rejected";
+  if (value === "deferred") return "deferred";
+  return "pending";
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function stringArray(value: unknown, fallback: string[] = []): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : fallback;
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }

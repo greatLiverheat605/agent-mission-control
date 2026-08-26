@@ -115,6 +115,28 @@
   color: var(--mc-danger);
 }
 
+.handoff-target {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--mc-border);
+  color: var(--mc-text-faint);
+  font-family: var(--mc-font-mono);
+  font-size: var(--mc-text-telemetry);
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+
+.handoff-target select {
+  min-height: var(--mc-target-min);
+  border: 1px solid var(--mc-border-strong);
+  padding: 6px 8px;
+  color: var(--mc-text-strong);
+  background: var(--mc-surface-raised);
+  font: inherit;
+  text-transform: none;
+}
+
 .continuity-notice,
 .continuity-status {
   display: flex;
