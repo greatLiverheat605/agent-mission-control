@@ -43,6 +43,7 @@ pub enum EventKind {
     BudgetExceeded,
     FlightEnvelopeChanged,
     LoadoutChanged,
+    MemoryItemChanged,
     PauseRequested,
     Unknown(String),
 }
@@ -68,6 +69,7 @@ impl EventKind {
             Self::BudgetExceeded => "budget_exceeded",
             Self::FlightEnvelopeChanged => "flight_envelope_changed",
             Self::LoadoutChanged => "loadout_changed",
+            Self::MemoryItemChanged => "memory_item_changed",
             Self::PauseRequested => "pause_requested",
             Self::Unknown(value) => value,
         }
@@ -120,6 +122,7 @@ impl<'de> Deserialize<'de> for EventKind {
                     "budget_exceeded" => EventKind::BudgetExceeded,
                     "flight_envelope_changed" => EventKind::FlightEnvelopeChanged,
                     "loadout_changed" => EventKind::LoadoutChanged,
+                    "memory_item_changed" => EventKind::MemoryItemChanged,
                     "pause_requested" => EventKind::PauseRequested,
                     other => EventKind::Unknown(other.to_owned()),
                 })

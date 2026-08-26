@@ -102,6 +102,7 @@ pub fn reduce(current: &ReadModel, event: &EventEnvelope) -> Result<ReadModel, P
         | EventKind::BudgetExceeded
         | EventKind::FlightEnvelopeChanged
         | EventKind::LoadoutChanged
+        | EventKind::MemoryItemChanged
         | EventKind::PauseRequested => {}
     }
     Ok(next)
