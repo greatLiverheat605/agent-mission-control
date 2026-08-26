@@ -227,7 +227,14 @@ impl AgentAdapter for ClaudeAdapter {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        for name in ["SystemRoot", "ComSpec", "PATH", "TEMP", "TMP"] {
+        for name in [
+            "SystemRoot",
+            "SystemDrive",
+            "ComSpec",
+            "PATH",
+            "TEMP",
+            "TMP",
+        ] {
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);
             }

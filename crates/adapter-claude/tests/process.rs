@@ -81,6 +81,12 @@ async fn fake_claude_uses_non_bare_stream_json_and_allowlisted_environment() {
         }
     });
     assert!(exited, "owned Claude child process survived termination");
+    assert!(
+        !PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("%SystemDrive%")
+            .exists(),
+        "cleared Windows environment created a literal SystemDrive path"
+    );
 }
 
 #[test]
