@@ -1,0 +1,4 @@
+process.stdout.write(JSON.stringify({ method: 'turn/started', params: { threadId: 'sim-thread', turn: { id: 'sim-turn' } } }) + '\n');
+process.stdout.write(JSON.stringify({ method: 'thread/tokenUsage/updated', params: { threadId: 'sim-thread', turnId: 'sim-turn', tokenUsage: { last: { inputTokens: 8, cachedInputTokens: 2, outputTokens: 1, reasoningOutputTokens: 0, totalTokens: 9 }, total: { inputTokens: 8, cachedInputTokens: 2, outputTokens: 1, reasoningOutputTokens: 0, totalTokens: 9 } } } }) + '\n');
+setTimeout(() => process.stdout.write(JSON.stringify({ method: 'thread/tokenUsage/updated', params: { threadId: 'sim-thread', turnId: 'sim-turn', tokenUsage: { last: { inputTokens: 16, cachedInputTokens: 4, outputTokens: 4, reasoningOutputTokens: 0, totalTokens: 20 }, total: { inputTokens: 16, cachedInputTokens: 4, outputTokens: 4, reasoningOutputTokens: 0, totalTokens: 20 } } } }) + '\n'), 40);
+setTimeout(() => setTimeout(() => {}, 10000), 80);

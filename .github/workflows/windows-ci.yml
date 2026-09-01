@@ -77,6 +77,14 @@ jobs:
         shell: powershell
         run: npm.cmd run build --workspace @mission-control/desktop
 
+      - name: Prepare desktop E2E binaries
+        shell: powershell
+        run: npm.cmd run pretest:e2e --workspace @mission-control/desktop
+
+      - name: Run desktop E2E against freshly built binaries
+        shell: powershell
+        run: npx.cmd playwright test --config playwright.config.ts
+
       - name: Test package smoke failures
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Import-Module Pester -RequiredVersion 5.7.1 -Force; Invoke-Pester -Path 'scripts/tests/package-smoke.Tests.ps1' -CI"

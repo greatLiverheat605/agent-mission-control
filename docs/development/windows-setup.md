@@ -97,3 +97,19 @@ The verifier reads the Microsoft Edge Update `Clients` registry keys under `HKLM
 4. Re-run the verifier without `-SkipWebView2`.
 
 Do not substitute the WebView2 SDK NuGet package for the Runtime. The SDK supplies build-time APIs; the Runtime supplies the installed browser engine that the verifier checks.
+## SQLCipher / OpenSSL
+
+The ledger builds SQLCipher through `openssl-sys` with its vendored source. A
+complete Perl installation is required by the OpenSSL build scripts; install
+[Strawberry Perl](https://strawberryperl.com/) and ensure its `bin` directory
+is on `PATH` before running Cargo. Verify the toolchain from PowerShell:
+
+```powershell
+perl --version
+cargo build --workspace --locked --offline
+```
+
+Do not substitute a minimal Perl runtime. Errors such as `Locale::Maketext`
+missing, `Can't locate Locale/Maketext.pm`, or a failure while generating the
+OpenSSL locale files indicate that Perl is incomplete or not visible on
+`PATH`. Fix the installation/PATH and rerun the build from a fresh shell.

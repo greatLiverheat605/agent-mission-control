@@ -1,0 +1,96 @@
+name: Codex Windows Preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release channel
+        required: true
+        default: preview
+        type: choice
+        options: [preview, internal]
+      distribution:
+        description: Distribution policy
+        required: true
+        default: oss-personal
+        type: choice
+        options: [oss-personal, commercial]
+
+jobs:
+  build-sign-smoke:
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    env:
+      MISSION_CONTROL_SIGNING_THUMBPRINT: ${{ secrets.MISSION_CONTROL_SIGNING_THUMBPRINT }}
+      MISSION_CONTROL_SIGNING_PFX_BASE64: ${{ secrets.MISSION_CONTROL_SIGNING_PFX_BASE64 }}
+      MISSION_CONTROL_SIGNING_PFX_PASSWORD: ${{ secrets.MISSION_CONTROL_SIGNING_PFX_PASSWORD }}
+      TAURI_UPDATER_SIGNATURE: ${{ secrets.TAURI_UPDATER_SIGNATURE }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - run: npm ci
+      - name: Build unsigned Codex preview
+        shell: pwsh
+        run: ./scripts/build-codex-release.ps1 -Channel '${{ inputs.channel }}'
+
+      - name: Import CI signing certificate into CurrentUser store
+        if: ${{ env.MISSION_CONTROL_SIGNING_PFX_BASE64 != '' && env.MISSION_CONTROL_SIGNING_PFX_PASSWORD != '' && env.MISSION_CONTROL_SIGNING_THUMBPRINT != '' }}
+        shell: pwsh
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'mission-control-signing.pfx'
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:MISSION_CONTROL_SIGNING_PFX_BASE64))
+          $password = ConvertTo-SecureString $env:MISSION_CONTROL_SIGNING_PFX_PASSWORD -AsPlainText -Force
+          Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password | Out-Null
+          $thumbprint = ($env:MISSION_CONTROL_SIGNING_THUMBPRINT -replace '\s', '').ToUpperInvariant()
+          if (-not (Get-ChildItem "Cert:\CurrentUser\My\$thumbprint" -ErrorAction SilentlyContinue)) { throw 'Imported signing certificate thumbprint does not match the configured secret.' }
+          Remove-Item -LiteralPath $pfxPath -Force
+
+      - name: fixture-selfcheck
+        shell: pwsh
+        run: |
+          $manifest = Get-ChildItem artifacts/codex-release/${{ inputs.channel }} -Filter manifest.json -Recurse | Where-Object { $_.Directory.Parent.Name -eq '${{ inputs.channel }}' } | Select-Object -First 1
+          if (-not $manifest) { throw 'Release manifest missing for fixture selfcheck.' }
+          ./scripts/test-update-rollback.ps1 -ManifestPath $manifest.FullName -FixtureMode
+
+      - name: unsigned-rejection-selfcheck
+        shell: pwsh
+        run: |
+          $manifest = Get-ChildItem artifacts/codex-release/${{ inputs.channel }} -Filter manifest.json -Recurse | Where-Object { $_.Directory.Parent.Name -eq '${{ inputs.channel }}' } | Select-Object -First 1
+          if (-not $manifest) { throw 'Release manifest missing for unsigned rejection selfcheck.' }
+          $output = Join-Path $env:RUNNER_TEMP 'mission-control-unsigned-rejection.log'
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-update-rollback.ps1 -ManifestPath $manifest.FullName *> $output
+          $exitCode = if ($null -eq $LASTEXITCODE) { 1 } else { $LASTEXITCODE }
+          if ($exitCode -eq 0) { throw 'Unsigned update was accepted outside FixtureMode.' }
+          if (-not (Get-Content -LiteralPath $output -Raw -Encoding utf8 | Select-String 'UPDATE_UNSIGNED')) { throw 'Unsigned rejection did not report UPDATE_UNSIGNED.' }
+      - name: Sign preview from certificate store
+        if: ${{ env.MISSION_CONTROL_SIGNING_PFX_BASE64 != '' && env.MISSION_CONTROL_SIGNING_PFX_PASSWORD != '' && env.MISSION_CONTROL_SIGNING_THUMBPRINT != '' && (env.TAURI_UPDATER_SIGNATURE != '' || env.TAURI_SIGNING_PRIVATE_KEY != '') }}
+        shell: pwsh
+        run: |
+          $manifest = Get-ChildItem artifacts/codex-release/${{ inputs.channel }} -Filter manifest.json -Recurse | Where-Object { $_.Directory.Parent.Name -eq '${{ inputs.channel }}' } | Select-Object -First 1
+          $artifact = Join-Path $manifest.DirectoryName ((Get-Content $manifest.FullName -Raw | ConvertFrom-Json).artifact)
+          ./scripts/sign-release.ps1 -ArtifactPath $artifact -ManifestPath $manifest.FullName -CertificateThumbprint $env:MISSION_CONTROL_SIGNING_THUMBPRINT
+
+      - name: signing-deferred-ci
+        if: ${{ env.MISSION_CONTROL_SIGNING_PFX_BASE64 == '' || env.MISSION_CONTROL_SIGNING_PFX_PASSWORD == '' || env.MISSION_CONTROL_SIGNING_THUMBPRINT == '' || (env.TAURI_UPDATER_SIGNATURE == '' && env.TAURI_SIGNING_PRIVATE_KEY == '') }}
+        shell: pwsh
+        run: Write-Output 'signingStatus=deferred-ci; no production signing credentials were supplied.'
+
+      - name: Verify full Codex release gate
+        id: release-gate
+        shell: pwsh
+        run: ./scripts/verify-codex-release.ps1 -Channel '${{ inputs.channel }}' -Distribution '${{ inputs.distribution }}' -RunId "ci-${{ github.run_id }}-${{ github.run_attempt }}" -SkipPackageBuild
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ steps.release-gate.outcome == 'success' }}
+        with:
+          name: codex-windows-${{ inputs.channel }}
+          path: artifacts/codex-release/${{ inputs.channel }}

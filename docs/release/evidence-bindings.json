@@ -1,0 +1,18 @@
+{
+  "schema": "mission-control-evidence-bindings-v1",
+  "bindings": [
+    {
+      "evidencePath": "artifacts/real-invocation/r8-real-readonly-20260828/real-invocation-report.json",
+      "sha256": "d85dfc66e6dd89a4b0cb9598719869b9ba5792873b7c3a3b16b2fdcd78e49924",
+      "firstBoundBundle": "artifacts/release-gate/r8-gate-final3-20260828/review-bundle.json",
+      "availability": "local-artifact",
+      "invocationTransport": "exec"
+    },
+    {
+      "evidencePath": "artifacts/real-invocation/r8-real-readonly-20260828/events.jsonl",
+      "sha256": "865c01f6496d924ce8f91afd8105cd5169df3b234239b905179cbb2d6cce5989",
+      "firstBoundBundle": "artifacts/release-gate/r8-gate-final3-20260828/review-bundle.json",
+      "availability": "local-artifact"
+    }
+  ]
+}
