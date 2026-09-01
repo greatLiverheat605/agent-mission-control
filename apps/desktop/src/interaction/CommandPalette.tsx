@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Command, Search } from "@mission-control/ui";
 import { useFocusReturn } from "./useFocusReturn";
 import { useLocale } from "../i18n/LocaleProvider";
@@ -19,6 +19,7 @@ export function CommandPalette({ open, commands, onClose, onRequestConfirmation 
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const input = useRef<HTMLInputElement>(null);
+  const dialog = useRef<HTMLElement>(null);
   useFocusReturn(open);
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -39,8 +40,22 @@ export function CommandPalette({ open, commands, onClose, onRequestConfirmation 
     else command.run();
     onClose();
   };
+  const trapFocus = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onClose();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(dialog.current?.querySelectorAll<HTMLElement>("input, button:not([disabled])") ?? []);
+    if (!focusable.length) return;
+    const index = focusable.indexOf(document.activeElement as HTMLElement);
+    const next = event.shiftKey ? (index <= 0 ? focusable.length - 1 : index - 1) : (index + 1) % focusable.length;
+    event.preventDefault();
+    focusable[next].focus();
+  };
   return <div className="command-palette-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
-    <section className="command-palette" role="dialog" aria-modal="true" aria-labelledby="command-palette-title">
+    <section ref={dialog} className="command-palette" role="dialog" aria-modal="true" aria-labelledby="command-palette-title" onKeyDown={trapFocus}>
       <header><Command aria-hidden="true" size={19} /><h2 id="command-palette-title">{t("palette.title")}</h2></header>
       <label className="command-search"><Search aria-hidden="true" size={18} /><span className="sr-only">{t("palette.search")}</span><input
         ref={input}
@@ -52,8 +67,7 @@ export function CommandPalette({ open, commands, onClose, onRequestConfirmation 
         value={query}
         onChange={(event) => { setQuery(event.target.value); setActiveIndex(0); }}
         onKeyDown={(event) => {
-          if (event.key === "Escape") onClose();
-          else if (event.key === "ArrowDown") { event.preventDefault(); setActiveIndex((index) => Math.min(visible.length - 1, index + 1)); }
+          if (event.key === "ArrowDown") { event.preventDefault(); setActiveIndex((index) => Math.min(visible.length - 1, index + 1)); }
           else if (event.key === "ArrowUp") { event.preventDefault(); setActiveIndex((index) => Math.max(0, index - 1)); }
           else if (event.key === "Enter") { event.preventDefault(); activate(visible[activeIndex]); }
         }}

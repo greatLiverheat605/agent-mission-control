@@ -86,7 +86,13 @@ function FramePerformanceMonitor({ performance, onLevel }: { performance: Adapti
 }
 
 export function sceneCanvasAvailable(): boolean {
-  return typeof window !== "undefined" && typeof window.ResizeObserver !== "undefined";
+  if (typeof window === "undefined" || typeof document === "undefined" || typeof window.ResizeObserver === "undefined") return false;
+  try {
+    const canvas = document.createElement("canvas");
+    return Boolean(canvas.getContext("webgl2"));
+  } catch {
+    return false;
+  }
 }
 
 function SceneLifecycle({ onUnavailable }: { onUnavailable?: () => void }) {

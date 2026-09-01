@@ -8,7 +8,7 @@ export default defineConfig({
   webServer: {
     command: "npm.cmd run dev --workspace @mission-control/desktop -- --host 127.0.0.1 --port 1420",
     url: "http://127.0.0.1:1420",
-    reuseExistingServer: true,
+    reuseExistingServer: false,
     timeout: 30_000,
   },
 });

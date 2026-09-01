@@ -1,4 +1,5 @@
 export {
+  Archive,
   Activity,
   Ban,
   Box,
@@ -12,6 +13,8 @@ export {
   CirclePause,
   Command,
   Copy,
+  Database,
+  Download,
   FileCheck2,
   Gauge,
   GitBranch,
@@ -33,6 +36,7 @@ export {
   ShieldCheck,
   ShieldAlert,
   SquareTerminal,
+  Trash2,
   Telescope,
   X,
 } from "lucide-react";

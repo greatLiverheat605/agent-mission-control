@@ -104,12 +104,7 @@ export function toFlightViewModel(model: MissionReadModel): FlightViewModel {
     },
     currentAction: actionView(model, events, routeState),
     evidenceBatches,
-    pendingApprovals: events.filter((event) => event.kind === "approval_requested").map((event) => ({
-      id: stringValue(event.payload.approval_id) ?? `approval-${event.sequence}`,
-      action: stringValue(event.payload.action) ?? "Unknown action",
-      scope: stringValue(event.payload.scope) ?? "Single action",
-      expiresAt: stringValue(event.payload.expires_at),
-    })),
+    pendingApprovals: pendingApprovalViews(events),
     loadout: loadoutView(events),
     budget: budgetView(events),
     notifications: events.filter((event) => event.kind.includes("warning") || event.kind.includes("error")).map((event) => ({
@@ -134,6 +129,29 @@ function projectMissionsView(
     action: stringValue(mission.action) ?? "Waiting",
   }));
   return peers.some((mission) => mission.id === active.id) ? peers : [active, ...peers];
+}
+
+function pendingApprovalViews(events: MissionEvent[]): FlightViewModel["pendingApprovals"] {
+  const approvals = new Map<string, { id: string; action: string; scope: string; expiresAt: string | null; state: string }>();
+  for (const event of events) {
+    if (!["approval_requested", "approval_resolved", "approval_revoked", "approval_consumed"].includes(event.kind)) continue;
+    const nested = objectValue(event.payload.approval);
+    const subject = objectValue(nested.subject);
+    const id = stringValue(event.payload.approval_id) ?? stringValue(nested.id) ?? `approval-${event.sequence}`;
+    const state = stringValue(nested.state) ?? (event.kind === "approval_requested" ? "pending" : event.kind.replace("approval_", ""));
+    const scopeValue = event.payload.scope ?? nested.scope;
+    const scope = stringValue(scopeValue) ?? (scopeValue && typeof scopeValue === "object" ? "Route action class" : "Single action");
+    const expiresAt = stringValue(event.payload.expires_at) ?? stringValue(nested.expires_at);
+    const expiresAtMs = numberValue(event.payload.expires_at_ms) ?? numberValue(nested.expires_at_ms);
+    approvals.set(id, {
+      id,
+      action: stringValue(event.payload.action) ?? stringValue(subject.action_class) ?? "Unknown action",
+      scope,
+      expiresAt: expiresAt ?? (expiresAtMs == null ? null : new Date(expiresAtMs).toISOString()),
+      state,
+    });
+  }
+  return [...approvals.values()].filter((approval) => approval.state === "pending").map(({ state: _state, ...approval }) => approval);
 }
 
 export function normalizeRouteState(value: unknown): RouteState {

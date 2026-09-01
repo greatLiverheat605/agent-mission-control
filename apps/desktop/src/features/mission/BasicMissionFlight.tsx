@@ -17,7 +17,7 @@ import {
   type CockpitViewId,
   type NavigationCameraId,
 } from "../../shell/cockpitViews";
-import { ApprovalDock } from "../approval/ApprovalDock";
+import { ApprovalDock, type ApprovalResolution } from "../approval/ApprovalDock";
 import { BudgetTelemetry } from "../budget/BudgetTelemetry";
 import { ContractOrbit } from "../contract/ContractOrbit";
 import { EvidenceBay } from "../evidence/EvidenceBay";
@@ -26,6 +26,9 @@ import { LoadoutPanel } from "../loadout/LoadoutPanel";
 import { MemoryReviewPanel, type MemoryDecision, type MemoryReviewItem } from "../memory";
 import { RecallInspector, type RecallEvidence } from "../memory";
 import { RecoveryReviewPanel, type RecoveryReviewManifest } from "../recovery";
+import { DiagnosticPreview, PreviewMetrics, type DiagnosticPreviewData, type PreviewMetricsData } from "../diagnostics";
+import { ExportPreview, type ExportPreviewData, StorageManager, type StorageImpact, type StorageSnapshot } from "../storage";
+import { UpdateReview, type UpdateReviewManifest } from "../update";
 import { EmergencyPause } from "./EmergencyPause";
 import { EventEvidence } from "./EventEvidence";
 import { LocaleSwitcher, useLocale } from "../../i18n/LocaleProvider";
@@ -43,6 +46,7 @@ type BasicMissionFlightProps = {
   onNewMission?: () => void;
   connectionState?: "connected" | "connecting" | "disconnected";
   onForceTerminate?: () => void;
+  onResolveApproval?: (id: string, decision: ApprovalResolution) => void;
   displayOverride?: ReactNode;
   recoveryPackage?: RecoveryReviewManifest | null;
   recoveryVerified?: boolean;
@@ -52,11 +56,28 @@ type BasicMissionFlightProps = {
   onResumeRecovery?: () => void;
   onMemoryDecision?: (id: string, decision: MemoryDecision) => void;
   onHandoff?: (provider: "codex" | "claude") => void;
+  storageSnapshot?: StorageSnapshot;
+  storageImpact?: StorageImpact | null;
+  exportPreview?: ExportPreviewData | null;
+  diagnosticPreview?: DiagnosticPreviewData | null;
+  previewMetrics?: PreviewMetricsData;
+  onPreviewTelemetryChange?: (enabled: boolean) => void;
+  onExportPreviewMetrics?: () => void;
+  onArchiveMission?: () => void;
+  onDeleteMission?: () => void;
+  onExportMission?: () => void;
+  updateReview?: UpdateReviewManifest | null;
+  updateVerified?: boolean;
+  updateActiveMission?: boolean;
+  onVerifyUpdate?: () => void;
+  onInstallUpdate?: () => void;
+  onRollbackUpdate?: () => void;
 };
 
-export function BasicMissionFlight({ mission, events, initialView = "nav", forceSceneFallback = false, forceReducedMotion, onPause, onReconnect, onDiscard, onNewMission, connectionState, onForceTerminate, displayOverride, recoveryPackage = null, recoveryVerified = false, recoveryBuilding = false, onBuildRecovery, onVerifyRecovery, onResumeRecovery, onMemoryDecision, onHandoff }: BasicMissionFlightProps) {
+export function BasicMissionFlight({ mission, events, initialView = "nav", forceSceneFallback = false, forceReducedMotion, onPause, onReconnect, onDiscard, onNewMission, connectionState, onForceTerminate, onResolveApproval, displayOverride, recoveryPackage = null, recoveryVerified = false, recoveryBuilding = false, onBuildRecovery, onVerifyRecovery, onResumeRecovery, onMemoryDecision, onHandoff, storageSnapshot, storageImpact = null, exportPreview = null, diagnosticPreview = null, previewMetrics, onPreviewTelemetryChange, onExportPreviewMetrics, onArchiveMission, onDeleteMission, onExportMission, updateReview = null, updateVerified = false, updateActiveMission = false, onVerifyUpdate, onInstallUpdate, onRollbackUpdate }: BasicMissionFlightProps) {
   const { t } = useLocale();
-  const recovering = mission.status === "paused" && mission.reason?.toLowerCase().includes("ui disconnected");
+  const recovering = mission.status === "paused"
+    && (mission.reason?.toLowerCase().includes("ui disconnected") || mission.reason?.toLowerCase().includes("recovery"));
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [activeView, setActiveView] = useState<CockpitViewId>(() => recovering ? "systems" : initialView);
   const [cameraView, setCameraView] = useState<NavigationCameraId>("fwd");
@@ -122,8 +143,8 @@ export function BasicMissionFlight({ mission, events, initialView = "nav", force
     sector: <CockpitViewFrame view="sector"><ProjectOrbit missions={projectMissions} selectedId={flight.mission.id} /></CockpitViewFrame>,
     mission: <CockpitViewFrame view="mission"><div className="cockpit-view-grid"><ContractOrbit flight={flight} /><BudgetTelemetry budget={flight.budget} /></div></CockpitViewFrame>,
     records: <CockpitViewFrame view="records"><EvidenceBay batches={flight.evidenceBatches} /></CockpitViewFrame>,
-    systems: <CockpitViewFrame view="systems"><div className="cockpit-view-grid"><LoadoutPanel loadout={flight.loadout} /><section className="orbit-panel systems-console" aria-labelledby="systems-console-title"><header className="panel-heading"><span className="panel-kicker">{t("systems.vessel")}</span><h2 id="systems-console-title">{t("systems.renderRecovery")}</h2></header><VisualPerformance value={performanceMode} fallback={sceneUnavailable} reducedMotion={reducedMotion} onChange={(mode) => { setPerformanceMode(mode); if (mode === "adaptive") setAdaptiveLevel(adaptivePerformance.level); }} />{recovering ? <RecoveryActions reason={mission.reason} onReconnect={onReconnect} onDiscard={onDiscard} /> : <AlertStrip title={t("systems.recovery")} tone="verified">{t("systems.noRecovery")}</AlertStrip>}</section><MemoryReviewPanel items={memoryItems} onDecision={onMemoryDecision} /><RecallInspector evidence={recallEvidence} /><RecoveryReviewPanel manifest={recoveryManifest} verified={recoveryVerified} onBuild={onBuildRecovery} building={recoveryBuilding} onVerify={onVerifyRecovery} onResume={onResumeRecovery} onDiscard={recovering ? undefined : onDiscard} /></div></CockpitViewFrame>,
-    authority: <CockpitViewFrame view="authority"><div className="cockpit-view-grid"><ContractOrbit flight={flight} /><ProviderHandoffPanel currentProvider={flight.loadout.provider} onHandoff={onHandoff} />{flight.pendingApprovals.length ? <ApprovalDock approvals={flight.pendingApprovals} /> : <section className="orbit-panel"><AlertStrip title={t("authority.clear")} tone="verified">{t("authority.none")}</AlertStrip></section>}</div></CockpitViewFrame>,
+    systems: <CockpitViewFrame view="systems"><div className="cockpit-view-grid"><LoadoutPanel loadout={flight.loadout} /><section className="orbit-panel systems-console" aria-labelledby="systems-console-title"><header className="panel-heading"><span className="panel-kicker">{t("systems.vessel")}</span><h2 id="systems-console-title">{t("systems.renderRecovery")}</h2></header><VisualPerformance value={performanceMode} fallback={sceneUnavailable} reducedMotion={reducedMotion} onChange={(mode) => { setPerformanceMode(mode); if (mode === "adaptive") setAdaptiveLevel(adaptivePerformance.level); }} />{recovering ? <RecoveryActions reason={mission.reason} onReconnect={onReconnect} onDiscard={onDiscard} /> : <AlertStrip title={t("systems.recovery")} tone="verified">{t("systems.noRecovery")}</AlertStrip>}</section><StorageManager snapshot={storageSnapshot ?? { missionId: mission.missionId, usedBytes: 0, eventCount: events.length, archived: false }} impact={storageImpact} onArchive={onArchiveMission} onDelete={onDeleteMission} onExport={onExportMission} /><ExportPreview preview={exportPreview} onExport={onExportMission} /><DiagnosticPreview preview={diagnosticPreview} />{previewMetrics && <PreviewMetrics data={previewMetrics} onTelemetryChange={onPreviewTelemetryChange} onExport={onExportPreviewMetrics} />}{updateReview && <UpdateReview manifest={updateReview} verified={updateVerified} activeMission={updateActiveMission} onVerify={onVerifyUpdate} onInstall={onInstallUpdate} onRollback={onRollbackUpdate} />}<MemoryReviewPanel items={memoryItems} onDecision={onMemoryDecision} /><RecallInspector evidence={recallEvidence} /><RecoveryReviewPanel manifest={recoveryManifest} verified={recoveryVerified} onBuild={onBuildRecovery} building={recoveryBuilding} onVerify={onVerifyRecovery} onResume={onResumeRecovery} onDiscard={recovering ? undefined : onDiscard} /></div></CockpitViewFrame>,
+    authority: <CockpitViewFrame view="authority"><div className="cockpit-view-grid"><ContractOrbit flight={flight} /><ProviderHandoffPanel currentProvider={flight.loadout.provider} onHandoff={onHandoff} />{flight.pendingApprovals.length ? <ApprovalDock approvals={flight.pendingApprovals} onResolve={onResolveApproval} /> : <section className="orbit-panel"><AlertStrip title={t("authority.clear")} tone="verified">{t("authority.none")}</AlertStrip></section>}</div></CockpitViewFrame>,
   } satisfies Record<CockpitViewId, ReactNode>;
   const effectiveView = recovering ? "systems" : activeView;
   const activeDisplay = displayOverride ?? viewDisplays[effectiveView];
@@ -135,7 +156,7 @@ export function BasicMissionFlight({ mission, events, initialView = "nav", force
     onViewChange={setActiveView}
     beam={<VesselBeam mission={flight.mission.label} route={flight.primaryRoute.id} routeState={flight.primaryRoute.state} state={t(`status.${flight.primaryRoute.state}`)} phase={mission.phase} sequence={mission.lastSequence} contextUsage={contextUsage} connectionState={resolvedConnection} />}
     portConsole={<MissionRegistry missions={projectMissions} selectedId={flight.mission.id} onNewMission={onNewMission} />}
-    display={<>{activeDisplay}<CommandPalette open={paletteOpen} commands={commands} onClose={() => setPaletteOpen(false)} onRequestConfirmation={() => undefined} /></>}
+    display={<>{mission.needsResync && <div className="mission-resync-alert" role="alert">Resync required: event sequence gap detected</div>}{activeDisplay}<CommandPalette open={paletteOpen} commands={commands} onClose={() => setPaletteOpen(false)} onRequestConfirmation={() => undefined} /></>}
     starboardConsole={<TaskConsole mission={mission} flight={flight} />}
     commandConsole={<CommandConsole missionId={flight.mission.id} commands={commands} onViewChange={setActiveView} onCameraChange={(camera) => { setCameraView(camera); setActiveView("nav"); }} onOpenPalette={openPalette} onShowStatus={() => { setActiveView("nav"); requestAnimationFrame(() => focus("[data-stage-detail]")); }} />}
     flightHelm={<FlightHelm flight={flight} paused={!onPause || mission.status === "paused" || mission.status === "completed"} onViewChange={setActiveView} onPause={onPause ?? noop} onOpenPalette={openPalette} />}

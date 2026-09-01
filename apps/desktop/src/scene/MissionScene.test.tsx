@@ -32,8 +32,17 @@ const flight = {
 describe("MissionScene", () => {
   it("renders an accessible full-bleed canvas description", () => {
     Object.defineProperty(window, "ResizeObserver", { configurable: true, value: class ResizeObserver { observe() {} unobserve() {} disconnect() {} } });
+    Object.defineProperty(HTMLCanvasElement.prototype, "getContext", { configurable: true, value: () => ({}) });
     render(<MissionScene flight={flight} />);
     expect(screen.getByRole("img", { name: /Policy UI.*Executing.*Run tests/i }).getAttribute("data-scene-ready")).toBe("true");
+  });
+
+  it("uses the 2D fallback immediately when WebGL2 is unavailable", () => {
+    Object.defineProperty(window, "ResizeObserver", { configurable: true, value: class ResizeObserver { observe() {} unobserve() {} disconnect() {} } });
+    Object.defineProperty(HTMLCanvasElement.prototype, "getContext", { configurable: true, value: () => null });
+    render(<MissionScene flight={flight} />);
+    const fallbacks = screen.getAllByRole("img", { name: /Policy UI.*Executing.*Run tests/i });
+    expect(fallbacks.find((node) => node.getAttribute("data-scene-ready") === "false")).toBeTruthy();
   });
 
   it("uses stable stage IDs and view-model-only agent positions", () => {

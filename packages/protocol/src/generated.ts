@@ -40,8 +40,9 @@ export interface StartAgentRequest {
   readOnly: boolean;
   approvedEnvironment: Array<[string, string]>;
   model?: string;
+  goal?: string;
   loadoutFingerprint: string;
-  resumeToken?: string;
+  resumeThreadId?: string;
   loadout?: LoadoutSnapshot;
 }
 
@@ -57,6 +58,8 @@ export type IpcCommand =
   | "ReviewMemory"
   | "BuildContextPack"
   | "BuildRecoveryPackage"
+  | "VerifyRecovery"
+  | "ResolveRecovery"
   | "HandoffProvider";
 
 export type ContinuityErrorCode =
@@ -67,6 +70,12 @@ export type ContinuityErrorCode =
   | "CONTEXTPACK_BUDGET_EXCEEDED"
   | "RECOVERY_TAMPERED"
   | "RECOVERY_SEQUENCE_INVALID"
+  | "RECOVERY_PACKAGE_REQUIRED"
+  | "RECOVERY_PACKAGE_INVALID"
+  | "RECOVERY_NOT_REQUIRED"
+  | "RECOVERY_DECISION_REQUIRED"
+  | "RECOVERY_VERIFY_FAILED"
+  | "RECOVERY_RESOLUTION_FAILED"
   | "PENDING_APPROVAL_MISMATCH"
   | "PERMISSION_EXPANSION"
   | "UNSUPPORTED_COMMAND";
@@ -104,6 +113,22 @@ export interface ProviderHandoffRequest {
 }
 
 export type Actor = "user" | "renderer" | "supervisor" | "agent";
+
+export type ApprovalDecision = "approve" | "deny" | "revoke";
+export type ApprovalGrantScope = "once" | "route_action_class";
+
+export interface ResolveApproval {
+  approvalId: string;
+  expectedRevision: number;
+  decision: ApprovalDecision;
+  missionId: string;
+  routeId: string;
+  contractVersion: number;
+  loadoutFingerprint: string;
+  actionDigest: string;
+  nowMs: number;
+  scope?: ApprovalGrantScope;
+}
 
 export interface RequestEnvelope {
   requestId: string;
@@ -154,6 +179,8 @@ export const IPC_COMMANDS: readonly IpcCommand[] = [
   "ReviewMemory",
   "BuildContextPack",
   "BuildRecoveryPackage",
+  "VerifyRecovery",
+  "ResolveRecovery",
   "HandoffProvider",
 ] as const;
 

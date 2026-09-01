@@ -108,4 +108,26 @@ describe("toFlightViewModel", () => {
     expect(flight.renderConfidence).toBe("degraded");
     expect(flight.agentPosition.motionState).toBe("checking");
   });
+
+  it("projects nested approval events and removes resolved approvals", () => {
+    const mission: MissionReadModel = {
+      ...emptyMission("mission-approval"),
+      events: [
+        { missionId: "mission-approval", sequence: 1, kind: "mission_created", payload: { route_id: "route-approval" } },
+        { missionId: "mission-approval", sequence: 2, kind: "approval_requested", payload: {
+          approval: {
+            id: "approval-nested",
+            state: "pending",
+            scope: "once",
+            expires_at_ms: 1_900_000_000_000,
+            subject: { action_class: "write" },
+          },
+        } },
+        { missionId: "mission-approval", sequence: 3, kind: "approval_resolved", payload: {
+          approval: { id: "approval-nested", state: "approved", scope: "once", subject: { action_class: "write" } },
+        } },
+      ],
+    };
+    expect(toFlightViewModel(mission).pendingApprovals).toEqual([]);
+  });
 });

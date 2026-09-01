@@ -50,6 +50,34 @@ describe("mission interaction", () => {
     expect(terminate).toHaveBeenCalledOnce();
   });
 
+  it("traps emergency confirmation focus and closes on Escape", async () => {
+    render(<EmergencyPause onPause={() => undefined} onForceTerminate={() => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "Safety cover" }));
+    fireEvent.click(screen.getByRole("button", { name: "Force terminate agent" }));
+    const dialog = screen.getByRole("dialog", { name: "Confirm force terminate" });
+    const cancel = screen.getByRole("button", { name: "Keep running" });
+    const confirm = screen.getByRole("button", { name: "Confirm force terminate" });
+    await waitFor(() => expect(document.activeElement).toBe(cancel));
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(document.activeElement).toBe(confirm);
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(document.activeElement).toBe(cancel);
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Confirm force terminate" })).toBeNull();
+  });
+
+  it("wraps command palette focus in both tab directions", async () => {
+    render(<CommandPalette open commands={commands} onClose={() => undefined} onRequestConfirmation={() => undefined} />);
+    const input = await screen.findByRole("combobox", { name: "Search missions and commands" });
+    const first = screen.getByRole("option", { name: /Open mission Policy UImission/ });
+    input.focus();
+    fireEvent.keyDown(input, { key: "Tab" });
+    expect(document.activeElement).toBe(first);
+    input.focus();
+    fireEvent.keyDown(input, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: /Force terminatecommand/ }));
+  });
+
   it("returns focus to the palette trigger", async () => {
     function Harness() {
       const [open, setOpen] = useState(false);

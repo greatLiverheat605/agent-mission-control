@@ -71,7 +71,8 @@ describe("mission edge surfaces", () => {
       { missionId: "mission-7", sequence: 6, kind: "test_completed", payload: { evidence_id: "ev-3", summary: "Checks passed", confidence: "verified" }, source: "supervisor" },
     ];
     const mission = { ...emptyMission("mission-7"), phase: "Execute", status: "running" as const, currentAction: "Run cockpit checks", events };
-    render(<BasicMissionFlight mission={mission} events={events} onPause={vi.fn()} onReconnect={vi.fn()} onDiscard={vi.fn()} />);
+    const onResolveApproval = vi.fn();
+    render(<BasicMissionFlight mission={mission} events={events} onPause={vi.fn()} onReconnect={vi.fn()} onDiscard={vi.fn()} onResolveApproval={onResolveApproval} />);
 
     fireEvent.click(screen.getByRole("tab", { name: /Sector/ }));
     expect(within(screen.getByRole("region", { name: "Sector display" })).getByRole("heading", { name: "Missions" })).toBeTruthy();
@@ -84,7 +85,10 @@ describe("mission edge surfaces", () => {
     fireEvent.click(screen.getByRole("tab", { name: /Authority/ }));
     const authority = within(screen.getByRole("region", { name: "Authority display" }));
     expect(authority.getByText("Install dependency")).toBeTruthy();
-    expect((authority.getByRole("button", { name: "Approve once" }) as HTMLButtonElement).disabled).toBe(true);
+    const approveOnce = authority.getByRole("button", { name: "Approve once" }) as HTMLButtonElement;
+    expect(approveOnce.disabled).toBe(false);
+    fireEvent.click(approveOnce);
+    expect(onResolveApproval).toHaveBeenCalledWith("approval-3", "approve-once");
   });
 
   it("uses continuity event metadata in the recovery review", () => {
