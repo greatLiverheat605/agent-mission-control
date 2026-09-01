@@ -2,6 +2,7 @@
 node_modules/
 dist/
 target/
+/artifacts/
 coverage/
 testResults.xml
 test-results/
@@ -27,6 +28,7 @@ Thumbs.db
 # Independent projects and local development state
 /MCP/
 /.codex/
+/checklist/
 /.claude/
 /.cursor/
 /.windsurf/
@@ -51,3 +53,5 @@ GEMINI.md
 /docs/handoff/
 /docs/evidence/
 /docs/reports/
+
+# Published source: scripts/, docs/, and fixtures/ are intentionally retained.
