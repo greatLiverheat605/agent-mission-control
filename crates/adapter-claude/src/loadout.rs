@@ -18,7 +18,7 @@ pub fn validate_start_request(request: &StartAgentRequest) -> Result<(), Adapter
             "Claude loadout fingerprint is required".to_owned(),
         ));
     }
-    if request.resume_token.is_some() {
+    if request.resume_thread_id.is_some() {
         return Err(AdapterError::Unsupported);
     }
     if request

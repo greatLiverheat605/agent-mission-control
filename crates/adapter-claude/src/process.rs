@@ -299,6 +299,7 @@ impl AgentAdapter for ClaudeAdapter {
                             let _ = child.kill().await;
                             break;
                         }
+                        Some(AgentControl::RespondToServerRequest { .. }) => {}
                     },
                     line = lines.next_line() => match line {
                         Ok(Some(line)) => {

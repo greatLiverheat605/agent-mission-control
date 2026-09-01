@@ -19,10 +19,19 @@ pub struct StartAgentRequest {
     pub read_only: bool,
     pub approved_environment: Vec<(String, String)>,
     pub model: Option<String>,
+    #[serde(default)]
+    pub goal: Option<String>,
     pub loadout_fingerprint: String,
-    pub resume_token: Option<String>,
+    #[serde(default = "default_contract_version")]
+    pub contract_version: u64,
+    #[serde(default)]
+    pub resume_thread_id: Option<String>,
     #[serde(default)]
     pub loadout: Option<LoadoutSnapshot>,
+}
+
+fn default_contract_version() -> u64 {
+    1
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -110,6 +119,7 @@ pub type EventSink = mpsc::UnboundedSender<AgentEvent>;
 pub enum AgentControl {
     SafePause { reason: String },
     Terminate,
+    RespondToServerRequest { request_id: Value, decision: String },
 }
 
 #[async_trait]
@@ -126,6 +136,15 @@ pub trait AgentAdapter: Send + Sync {
     }
 
     async fn terminate_owned_tree(&self, _run_id: &str) -> Result<(), AdapterError> {
+        Err(AdapterError::Unsupported)
+    }
+
+    async fn respond_to_server_request(
+        &self,
+        _run_id: &str,
+        _request_id: Value,
+        _decision: &str,
+    ) -> Result<(), AdapterError> {
         Err(AdapterError::Unsupported)
     }
 }

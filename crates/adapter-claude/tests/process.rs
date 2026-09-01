@@ -20,8 +20,10 @@ fn request() -> StartAgentRequest {
         read_only: true,
         approved_environment: vec![("CLAUDE_TEST_ALLOWED".to_owned(), "yes".to_owned())],
         model: None,
+        goal: Some("fixture mission goal".to_owned()),
         loadout_fingerprint: "fixture-loadout".to_owned(),
-        resume_token: None,
+        contract_version: 1,
+        resume_thread_id: None,
         loadout: None,
     }
 }
@@ -92,11 +94,11 @@ async fn fake_claude_uses_non_bare_stream_json_and_allowlisted_environment() {
 #[test]
 fn claude_loadout_contract_rejects_resume_and_provider_mismatch() {
     let mut request = request();
-    request.resume_token = Some("resume-token".to_owned());
+    request.resume_thread_id = Some("resume-token".to_owned());
     let error = adapter_claude::validate_start_request(&request).expect_err("resume rejected");
     assert!(matches!(error, adapter_core::AdapterError::Unsupported));
 
-    request.resume_token = None;
+    request.resume_thread_id = None;
     request.provider = ProviderId::Codex;
     let error = adapter_claude::validate_start_request(&request).expect_err("provider rejected");
     assert!(matches!(error, adapter_core::AdapterError::Protocol(_)));

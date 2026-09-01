@@ -20,8 +20,10 @@ async fn fake_adapter_emits_ordered_events_and_exposes_capabilities() {
         read_only: true,
         approved_environment: Vec::new(),
         model: None,
+        goal: Some("contract goal".to_owned()),
         loadout_fingerprint: "fixture".to_owned(),
-        resume_token: None,
+        contract_version: 1,
+        resume_thread_id: None,
         loadout: None,
     };
     let (sink, _rx) = mpsc::unbounded_channel::<AgentEvent>();

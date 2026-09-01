@@ -31,15 +31,27 @@ pub enum NativeParseError {
     MissingType,
     #[error("invalid native JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("native event exceeds protocol limits")]
+    LimitExceeded,
 }
 
 pub fn parse_native_line(line: &str) -> Result<NativeEvent, NativeParseError> {
+    if line.len() > 4 * 1024 * 1024 {
+        return Err(NativeParseError::LimitExceeded);
+    }
     let value: Value = serde_json::from_str(line)?;
+    if json_depth(&value) > 64 {
+        return Err(NativeParseError::LimitExceeded);
+    }
     let object = value.as_object().ok_or(NativeParseError::NotObject)?;
     let event_type = object
         .get("type")
+        .or_else(|| object.get("method"))
         .and_then(Value::as_str)
         .ok_or(NativeParseError::MissingType)?;
+    if event_type.is_empty() || event_type.len() > 256 {
+        return Err(NativeParseError::LimitExceeded);
+    }
     let mut fields = object.clone();
     fields.remove("type");
     let id = fields
@@ -50,4 +62,12 @@ pub fn parse_native_line(line: &str) -> Result<NativeEvent, NativeParseError> {
         id,
         fields,
     })
+}
+
+fn json_depth(value: &Value) -> usize {
+    match value {
+        Value::Array(values) => values.iter().map(json_depth).max().unwrap_or(0) + 1,
+        Value::Object(values) => values.values().map(json_depth).max().unwrap_or(0) + 1,
+        _ => 0,
+    }
 }
