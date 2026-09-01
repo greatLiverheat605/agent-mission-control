@@ -4,6 +4,7 @@ members = ["crates/*", "apps/*/src-tauri"]
 
 [workspace.package]
 edition = "2024"
+license = "MIT"
 
 [workspace.dependencies]
 anyhow = "1.0"

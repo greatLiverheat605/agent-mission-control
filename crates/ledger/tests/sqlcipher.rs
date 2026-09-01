@@ -66,6 +66,47 @@ fn append_is_idempotent_and_sequence_is_monotonic() {
 }
 
 #[test]
+fn append_batch_rolls_back_all_events_when_a_later_event_fails() {
+    let path =
+        std::env::temp_dir().join(format!("mission-ledger-batch-{}.db", uuid::Uuid::new_v4()));
+    let store = InMemoryKeyStore::default();
+    let mission = MissionId::new();
+    let route = RouteId::new();
+    let mut ledger = EncryptedLedger::open(&path, "install", store).expect("open ledger");
+    let first = EventEnvelope::new(
+        EventId::new(),
+        mission,
+        route,
+        1,
+        EventKind::MissionCreated,
+        json!({"goal": "atomic"}),
+    );
+    // Sequence 3 is invalid on an empty mission and must abort the whole batch.
+    let invalid = EventEnvelope::new(
+        EventId::new(),
+        mission,
+        route,
+        3,
+        EventKind::RouteCreated,
+        json!({"route_id": route}),
+    );
+    assert!(matches!(
+        ledger.append_batch(&[first, invalid]),
+        Err(LedgerError::SequenceViolation)
+    ));
+    assert!(ledger.mission_ids().expect("mission ids").is_empty());
+    assert!(
+        ledger
+            .replay(&mission.to_string())
+            .expect("replay")
+            .is_empty()
+    );
+    assert_eq!(ledger.integrity_report().expect("integrity").event_count, 0);
+    drop(ledger);
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn mission_ids_are_recoverable_for_service_rehydration() {
     let path = std::env::temp_dir().join(format!(
         "mission-ledger-missions-{}.db",
@@ -126,6 +167,28 @@ fn missing_key_fails_closed_without_initializing_a_database() {
         Err(LedgerError::KeyUnavailable)
     ));
     assert!(path.exists());
+    fs::remove_dir_all(root).expect("remove temp root");
+}
+
+#[test]
+fn integrity_report_exposes_last_committed_sequence_without_mutation() {
+    let root =
+        std::env::temp_dir().join(format!("mission-ledger-integrity-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&root).expect("create temp root");
+    let path = root.join("ledger.db");
+    let store = InMemoryKeyStore::default();
+    let mission = MissionId::new();
+    let mut ledger = EncryptedLedger::open(&path, "install", store).expect("open ledger");
+    for sequence in 1..=2 {
+        let mut item = event(sequence, json!({"sequence": sequence}));
+        item.mission_id = mission;
+        ledger.append(&item).expect("append event");
+    }
+    let report = ledger.integrity_report().expect("integrity report");
+    assert_eq!(report.event_count, 2);
+    assert_eq!(report.last_committed_sequence, 2);
+    assert!(!report.recovery_required);
+    drop(ledger);
     fs::remove_dir_all(root).expect("remove temp root");
 }
 

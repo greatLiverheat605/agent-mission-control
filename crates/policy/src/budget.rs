@@ -41,7 +41,9 @@ impl BudgetLimits {
         match dimension {
             BudgetDimension::Tokens => self.tokens,
             BudgetDimension::MoneyMicros => self.money_micros,
-            BudgetDimension::WallClock => self.wall_clock.as_millis().min(u128::from(u64::MAX)) as u64,
+            BudgetDimension::WallClock => {
+                self.wall_clock.as_millis().min(u128::from(u64::MAX)) as u64
+            }
             BudgetDimension::ChangedLines => self.changed_lines,
             BudgetDimension::ChangedFiles => self.changed_files,
             BudgetDimension::ModelCalls => self.model_calls,
@@ -191,9 +193,7 @@ impl BudgetTracker {
         for dimension in BudgetDimension::ALL {
             match self.projection.get(&dimension) {
                 Some(Projection::Unknown) => signals.push(match self.unknown_policy {
-                    UnknownUsagePolicy::RequireApproval => {
-                        BudgetSignal::RequireApproval(dimension)
-                    }
+                    UnknownUsagePolicy::RequireApproval => BudgetSignal::RequireApproval(dimension),
                     UnknownUsagePolicy::Pause => BudgetSignal::PauseAtSafeBoundary(dimension),
                 }),
                 Some(Projection::Known(used)) => {

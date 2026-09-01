@@ -25,7 +25,7 @@ use windows_sys::Win32::System::Pipes::{
 
 use supervisor_bridge::{
     BridgeError, LocalSupervisorTransport, PublicSupervisorStatus, SupervisorBridge,
-    SupervisorTransport,
+    SupervisorTransport, command_io_timeout,
 };
 
 macro_rules! command_names {
@@ -49,6 +49,21 @@ impl IpcDispatcher for EchoDispatcher {
         command: &str,
         request: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({ "command": command, "request": request }))
+    }
+
+    fn touch_ui(&self) {}
+}
+
+struct SlowDispatcher(Duration);
+
+impl IpcDispatcher for SlowDispatcher {
+    fn dispatch(
+        &self,
+        command: &str,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        thread::sleep(self.0);
         Ok(serde_json::json!({ "command": command, "request": request }))
     }
 
@@ -203,6 +218,22 @@ fn authentication_failures_map_to_a_fixed_renderer_error() {
 }
 
 #[test]
+fn timeout_status_is_reported_as_degraded_with_a_fixed_code() {
+    let bridge = SupervisorBridge::new(FakePipe {
+        response: Err(BridgeError::Timeout),
+    });
+
+    assert_eq!(
+        bridge.ping_supervisor(),
+        PublicSupervisorStatus {
+            connection: "degraded",
+            version: None,
+            error_code: Some("SUPERVISOR_TIMEOUT"),
+        }
+    );
+}
+
+#[test]
 fn real_transport_dispatches_allowlisted_mission_commands_over_the_authenticated_pipe() {
     let pipe_name = unique_pipe_name();
     let server = IpcServer::spawn_with_dispatcher(
@@ -241,11 +272,21 @@ fn mission_allowlist_exposes_recovery_package_command() {
         "launch_route",
         "subscribe_mission",
         "request_safe_pause",
+        "request_force_termination",
         "force_terminate",
+        "resolve_approval",
         "build_recovery_package",
+        "verify_recovery",
+        "resolve_recovery",
         "review_memory",
         "handoff_provider",
         "provider_capabilities",
+        "storage_preview",
+        "export_preview",
+        "diagnostic_preview",
+        "archive_mission",
+        "delete_mission",
+        "materialize_export",
     ];
 
     assert_eq!(
@@ -346,7 +387,7 @@ fn real_transport_times_out_partial_responses_and_reconnects() {
     let started = Instant::now();
     assert_eq!(transport.ping(), Err(BridgeError::Unavailable));
     assert!(
-        started.elapsed() < Duration::from_secs(2),
+        started.elapsed() < Duration::from_secs(5),
         "partial response exceeded the client deadline"
     );
 
@@ -389,11 +430,46 @@ fn io_deadline_retries_cancellation_across_frame_read_boundary() {
 
     let _ = release_stall.send(());
     stalled_server.join().expect("join boundary fixture server");
-    assert_eq!(result, Err(BridgeError::Unavailable));
+    assert_eq!(result, Err(BridgeError::Timeout));
     assert!(
         elapsed < Duration::from_secs(1),
         "frame boundary cancellation took {elapsed:?}"
     );
+}
+
+#[test]
+fn command_deadlines_are_classified_by_operation_type() {
+    assert_eq!(command_io_timeout("launch_route"), Duration::from_secs(15));
+    assert_eq!(
+        command_io_timeout("resolve_recovery"),
+        Duration::from_secs(15)
+    );
+    assert_eq!(
+        command_io_timeout("subscribe_mission"),
+        Duration::from_secs(5)
+    );
+}
+
+#[test]
+fn long_command_deadline_allows_controlled_cold_start() {
+    let pipe_name = unique_pipe_name();
+    let server = IpcServer::spawn_with_dispatcher(
+        &pipe_name,
+        PRODUCT_INSTALL_ID,
+        FixtureSecret,
+        Arc::new(SlowDispatcher(Duration::from_secs(2))),
+    )
+    .expect("start slow command fixture server");
+    let mut transport = LocalSupervisorTransport::for_test(&pipe_name, FixtureSecret);
+
+    let started = Instant::now();
+    let result = transport.command("launch_route", serde_json::json!({ "fixture": true }));
+    let elapsed = started.elapsed();
+
+    assert!(result.is_ok(), "long command failed: {result:?}");
+    assert!(elapsed >= Duration::from_secs(2));
+    assert!(elapsed < Duration::from_secs(15));
+    server.shutdown().expect("stop slow command fixture server");
 }
 
 #[test]

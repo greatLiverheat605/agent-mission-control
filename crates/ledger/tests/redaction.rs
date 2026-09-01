@@ -52,3 +52,29 @@ fn oversized_or_deep_input_fails_closed() {
         Err(RedactionError::LimitExceeded)
     );
 }
+
+#[test]
+fn redaction_replaces_all_repeated_credentials_and_normalizes_camel_case_keys() {
+    let value = json!({
+        "message": "Bearer first-token Bearer second-token",
+        "accessToken": "access-secret",
+        "privateKey": "private-secret",
+        "credentials": "credential-secret",
+        "apiKeys": ["key-secret"]
+    });
+    let result = Redactor::default()
+        .redact_event(value)
+        .expect("redact payload");
+    let serialized = serde_json::to_string(&result.value).expect("serialize");
+    assert!(!serialized.contains("first-token"));
+    assert!(!serialized.contains("second-token"));
+    for key in ["accessToken", "privateKey", "credentials", "apiKeys"] {
+        assert!(
+            result.value[key]
+                .as_str()
+                .is_some_and(|value| value.starts_with("[REDACTED:")),
+            "key {key} was not redacted"
+        );
+    }
+    assert!(result.audit.replacement_count >= 6);
+}

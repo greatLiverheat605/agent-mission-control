@@ -165,7 +165,7 @@ fn redact_text(text: &str, audit: &mut RedactionAudit) -> String {
 }
 
 fn is_sensitive_field(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
+    let key = normalize_key(key);
     [
         "token",
         "secret",
@@ -182,7 +182,7 @@ fn is_sensitive_field(key: &str) -> bool {
 }
 
 fn field_category(key: &str) -> &'static str {
-    let key = key.to_ascii_lowercase();
+    let key = normalize_key(key);
     if key.contains("password") {
         "password"
     } else if key.contains("token") {
@@ -196,6 +196,40 @@ fn field_category(key: &str) -> &'static str {
     } else {
         "secret_field"
     }
+}
+
+fn normalize_key(key: &str) -> String {
+    let mut normalized = String::with_capacity(key.len() + 4);
+    let mut previous_lowercase = false;
+    for character in key.chars() {
+        if character.is_ascii_uppercase() {
+            if previous_lowercase {
+                normalized.push('_');
+            }
+            normalized.push(character.to_ascii_lowercase());
+            previous_lowercase = false;
+        } else {
+            normalized.push(character.to_ascii_lowercase());
+            previous_lowercase = character.is_ascii_lowercase() || character.is_ascii_digit();
+        }
+    }
+    for plural in [
+        "tokens",
+        "secrets",
+        "passwords",
+        "authorizations",
+        "cookies",
+        "api_keys",
+        "apikeys",
+        "private_keys",
+        "credentials",
+    ] {
+        if normalized.ends_with(plural) {
+            normalized.truncate(normalized.len() - 1);
+            break;
+        }
+    }
+    normalized
 }
 
 fn marker(category: &str, secret: &[u8], audit: &mut RedactionAudit) -> String {

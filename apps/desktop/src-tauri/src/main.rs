@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod supervisor_bridge;
+mod update_guard;
 
 use std::sync::Arc;
 
@@ -62,11 +63,21 @@ mission_command!(update_mission_contract);
 mission_command!(launch_route);
 mission_command!(subscribe_mission);
 mission_command!(request_safe_pause);
+mission_command!(request_force_termination);
 mission_command!(force_terminate);
+mission_command!(resolve_approval);
 mission_command!(build_recovery_package);
+mission_command!(verify_recovery);
+mission_command!(resolve_recovery);
 mission_command!(review_memory);
 mission_command!(handoff_provider);
 mission_command!(provider_capabilities);
+mission_command!(storage_preview);
+mission_command!(export_preview);
+mission_command!(diagnostic_preview);
+mission_command!(archive_mission);
+mission_command!(delete_mission);
+mission_command!(materialize_export);
 
 fn main() {
     debug_assert_eq!(ALLOWED_COMMANDS, ["supervisor_status", "ping_supervisor"]);
@@ -78,11 +89,21 @@ fn main() {
             "launch_route",
             "subscribe_mission",
             "request_safe_pause",
+            "request_force_termination",
             "force_terminate",
+            "resolve_approval",
             "build_recovery_package",
+            "verify_recovery",
+            "resolve_recovery",
             "review_memory",
             "handoff_provider",
-            "provider_capabilities"
+            "provider_capabilities",
+            "storage_preview",
+            "export_preview",
+            "diagnostic_preview",
+            "archive_mission",
+            "delete_mission",
+            "materialize_export"
         ]
     );
     tauri::Builder::default()
@@ -105,11 +126,21 @@ fn main() {
             launch_route,
             subscribe_mission,
             request_safe_pause,
+            request_force_termination,
             force_terminate,
+            resolve_approval,
             build_recovery_package,
+            verify_recovery,
+            resolve_recovery,
             review_memory,
             handoff_provider,
-            provider_capabilities
+            provider_capabilities,
+            storage_preview,
+            export_preview,
+            diagnostic_preview,
+            archive_mission,
+            delete_mission,
+            materialize_export
         ))
         .run(tauri::generate_context!())
         .expect("run Agent Mission Control desktop");

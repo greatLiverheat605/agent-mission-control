@@ -118,8 +118,25 @@ impl PauseController {
     }
 
     pub fn timeout(&mut self) -> Result<PauseTransition, PauseError> {
+        self.force_termination_token()
+    }
+
+    pub fn force_termination_token(&mut self) -> Result<PauseTransition, PauseError> {
         let from = self.state.clone();
-        if !matches!(self.state, PauseState::PauseRequested { .. }) {
+        if let PauseState::ForceTerminationAvailable { confirmation_token } = &self.state {
+            return Ok(PauseTransition {
+                from,
+                to: self.state.clone(),
+                confirmation_token: Some(confirmation_token.clone()),
+            });
+        }
+        if !matches!(
+            self.state,
+            PauseState::PauseRequested { .. }
+                | PauseState::PauseAcknowledged
+                | PauseState::Paused { .. }
+                | PauseState::PauseTimedOut
+        ) {
             return Err(PauseError::InvalidState);
         }
         self.token_counter += 1;
@@ -175,5 +192,27 @@ mod tests {
         assert!(controller.force_terminate("wrong").is_err());
         controller.force_terminate(&token).expect("terminate");
         assert_eq!(controller.state(), &PauseState::Terminated);
+        assert!(!controller.can_force_terminate(&token));
+        assert!(controller.force_terminate(&token).is_err());
+    }
+
+    #[test]
+    fn explicit_force_request_is_idempotent_until_token_is_consumed() {
+        let mut controller = PauseController::default();
+        controller
+            .request("user requested force termination")
+            .expect("request");
+        let first = controller
+            .force_termination_token()
+            .expect("first token")
+            .confirmation_token
+            .expect("first token value");
+        let second = controller
+            .force_termination_token()
+            .expect("repeat token request")
+            .confirmation_token
+            .expect("repeat token value");
+        assert_eq!(first, second);
+        assert!(controller.force_terminate("pause-force-999").is_err());
     }
 }

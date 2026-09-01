@@ -78,3 +78,20 @@ fn ledger_backed_blob_store_uses_the_ledger_metadata_database() {
     drop(ledger);
     fs::remove_dir_all(root).expect("remove temp root");
 }
+
+#[test]
+fn recovery_report_detects_incomplete_temp_writes_without_deleting_them() {
+    let root =
+        std::env::temp_dir().join(format!("mission-blobs-recovery-{}", uuid::Uuid::new_v4()));
+    let store = EncryptedBlobStore::open(&root, [8_u8; 32]).expect("open blob store");
+    let temp = root.join("aa").join("bb");
+    fs::create_dir_all(&temp).expect("create shard");
+    let temp_file = temp.join(".partial.tmp");
+    fs::write(&temp_file, b"partial").expect("write temp");
+    let report = store.recovery_report().expect("recovery report");
+    assert!(report.recovery_required);
+    assert_eq!(report.temporary_files.len(), 1);
+    assert!(temp_file.exists());
+    drop(store);
+    fs::remove_dir_all(root).expect("remove temp root");
+}

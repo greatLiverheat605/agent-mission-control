@@ -17,6 +17,8 @@ use windows_sys::Win32::System::JobObjects::{
 pub struct OwnedProcessTree {
     root_pid: Option<u32>,
     pids: BTreeSet<u32>,
+    #[cfg(test)]
+    termination_failure: Option<String>,
     #[cfg(windows)]
     job: Option<HANDLE>,
 }
@@ -48,6 +50,8 @@ impl OwnedProcessTree {
                     return Self {
                         root_pid: None,
                         pids: BTreeSet::new(),
+                        #[cfg(test)]
+                        termination_failure: None,
                         job: None,
                     };
                 }
@@ -55,6 +59,8 @@ impl OwnedProcessTree {
             Self {
                 root_pid: None,
                 pids: BTreeSet::new(),
+                #[cfg(test)]
+                termination_failure: None,
                 job,
             }
         }
@@ -99,6 +105,10 @@ impl OwnedProcessTree {
     }
 
     pub fn terminate(&mut self) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(message) = self.termination_failure.take() {
+            return Err(io::Error::other(message));
+        }
         let Some(_root) = self.root_pid else {
             return Ok(());
         };
@@ -112,6 +122,11 @@ impl OwnedProcessTree {
         }
         self.pids.clear();
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn fail_termination_for_test(&mut self, message: impl Into<String>) {
+        self.termination_failure = Some(message.into());
     }
 }
 

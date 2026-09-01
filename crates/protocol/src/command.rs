@@ -14,6 +14,8 @@ pub enum IpcCommand {
     ReviewMemory,
     BuildContextPack,
     BuildRecoveryPackage,
+    VerifyRecovery,
+    ResolveRecovery,
     HandoffProvider,
 }
 
@@ -27,6 +29,12 @@ pub enum ContinuityErrorCode {
     ContextPackBudgetExceeded,
     RecoveryTampered,
     RecoverySequenceInvalid,
+    RecoveryPackageRequired,
+    RecoveryPackageInvalid,
+    RecoveryNotRequired,
+    RecoveryDecisionRequired,
+    RecoveryVerifyFailed,
+    RecoveryResolutionFailed,
     PendingApprovalMismatch,
     PermissionExpansion,
     UnsupportedCommand,
@@ -42,6 +50,12 @@ impl ContinuityErrorCode {
             Self::ContextPackBudgetExceeded => "CONTEXTPACK_BUDGET_EXCEEDED",
             Self::RecoveryTampered => "RECOVERY_TAMPERED",
             Self::RecoverySequenceInvalid => "RECOVERY_SEQUENCE_INVALID",
+            Self::RecoveryPackageRequired => "RECOVERY_PACKAGE_REQUIRED",
+            Self::RecoveryPackageInvalid => "RECOVERY_PACKAGE_INVALID",
+            Self::RecoveryNotRequired => "RECOVERY_NOT_REQUIRED",
+            Self::RecoveryDecisionRequired => "RECOVERY_DECISION_REQUIRED",
+            Self::RecoveryVerifyFailed => "RECOVERY_VERIFY_FAILED",
+            Self::RecoveryResolutionFailed => "RECOVERY_RESOLUTION_FAILED",
             Self::PendingApprovalMismatch => "PENDING_APPROVAL_MISMATCH",
             Self::PermissionExpansion => "PERMISSION_EXPANSION",
             Self::UnsupportedCommand => "UNSUPPORTED_COMMAND",
@@ -106,6 +120,13 @@ pub enum ApprovalDecision {
     Revoke,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalGrantScope {
+    Once,
+    RouteActionClass,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ResolveApproval {
     pub approval_id: String,
@@ -117,6 +138,8 @@ pub struct ResolveApproval {
     pub loadout_fingerprint: String,
     pub action_digest: String,
     pub now_ms: u64,
+    #[serde(default)]
+    pub scope: Option<ApprovalGrantScope>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -157,6 +180,8 @@ impl IpcCommand {
             Self::ReviewMemory,
             Self::BuildContextPack,
             Self::BuildRecoveryPackage,
+            Self::VerifyRecovery,
+            Self::ResolveRecovery,
             Self::HandoffProvider,
         ]
     }

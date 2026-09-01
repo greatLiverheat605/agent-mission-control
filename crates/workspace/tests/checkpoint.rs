@@ -7,8 +7,16 @@ use std::time::Duration;
 use mission_workspace::{CheckpointRequest, CheckpointTrigger, GitCheckpoint, GitRunner};
 
 fn git(cwd: &Path, args: &[&str]) -> String {
-    let output = Command::new("git").args(args).current_dir(cwd).output().expect("git");
-    assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("git");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
@@ -26,7 +34,8 @@ fn checkpoint_commit_records_complete_metadata_without_secret_text() {
     let temp = tempfile::tempdir().expect("temp");
     repo(temp.path());
     fs::write(temp.path().join("tracked.txt"), b"changed\n").expect("change");
-    let runner = GitRunner::new(OsStr::new("git"), temp.path(), Duration::from_secs(10)).expect("runner");
+    let runner =
+        GitRunner::new(OsStr::new("git"), temp.path(), Duration::from_secs(10)).expect("runner");
 
     let checkpoint = GitCheckpoint::create(
         &runner,
@@ -44,7 +53,10 @@ fn checkpoint_commit_records_complete_metadata_without_secret_text() {
     assert_eq!(checkpoint.metadata.file_hashes.len(), 1);
     assert_eq!(checkpoint.metadata.contract_version, 9);
     assert_eq!(checkpoint.metadata.ledger_sequence, 44);
-    assert_eq!(git(temp.path(), &["show", "-s", "--format=%an <%ae>", "HEAD"]), "Agent Mission Control <checkpoint@mission-control.invalid>");
+    assert_eq!(
+        git(temp.path(), &["show", "-s", "--format=%an <%ae>", "HEAD"]),
+        "Agent Mission Control <checkpoint@mission-control.invalid>"
+    );
     let subject = git(temp.path(), &["show", "-s", "--format=%s", "HEAD"]);
     assert!(subject.contains("cp-001"));
     assert!(!subject.contains("loadout-v9"));
@@ -66,7 +78,8 @@ fn checkpoint_supports_every_required_safe_trigger_and_rejects_secret_like_ids()
 
     let temp = tempfile::tempdir().expect("temp");
     repo(temp.path());
-    let runner = GitRunner::new(OsStr::new("git"), temp.path(), Duration::from_secs(10)).expect("runner");
+    let runner =
+        GitRunner::new(OsStr::new("git"), temp.path(), Duration::from_secs(10)).expect("runner");
     let result = GitCheckpoint::create(
         &runner,
         CheckpointRequest {

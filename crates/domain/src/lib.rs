@@ -10,7 +10,7 @@ pub use contract::{
     ApprovalPolicy, Budget, ContractDiff, ContractFieldDiff, ContractPatch, DrivingMode, Loadout,
     MissionContract, PatchActor, VersionConflict,
 };
-pub use event::{EventConfidence, EventEnvelope, EventKind, EventLinks, EventSource};
+pub use event::{EventConfidence, EventEnvelope, EventKind, EventLinks, EventSource, payload_hash};
 pub use evidence::{
     Approval, CriterionEvidence, CriterionStatus, EvidenceEntry, EvidenceKind, EvidenceMatrix,
     EvidenceMatrixError,

@@ -3,6 +3,7 @@ use std::io;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -21,8 +22,22 @@ use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, GetCurrentThreadId, OpenThread, THREAD_TERMINATE,
 };
 
-const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(1);
+const HANDSHAKE_IO_TIMEOUT: Duration = Duration::from_secs(5);
+const PING_IO_TIMEOUT: Duration = Duration::from_secs(1);
+const COMMAND_IO_TIMEOUT: Duration = Duration::from_secs(5);
+const LONG_COMMAND_IO_TIMEOUT: Duration = Duration::from_secs(15);
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+pub(crate) fn command_io_timeout(command: &str) -> Duration {
+    match command {
+        "launch_route"
+        | "build_recovery_package"
+        | "verify_recovery"
+        | "resolve_recovery"
+        | "handoff_provider" => LONG_COMMAND_IO_TIMEOUT,
+        _ => COMMAND_IO_TIMEOUT,
+    }
+}
 
 macro_rules! supervisor_commands {
     ($callback:ident) => {
@@ -48,18 +63,28 @@ macro_rules! mission_commands {
             launch_route,
             subscribe_mission,
             request_safe_pause,
+            request_force_termination,
             force_terminate,
+            resolve_approval,
             build_recovery_package,
+            verify_recovery,
+            resolve_recovery,
             review_memory,
             handoff_provider,
-            provider_capabilities
+            provider_capabilities,
+            storage_preview,
+            export_preview,
+            diagnostic_preview,
+            archive_mission,
+            delete_mission,
+            materialize_export
         )
     };
 }
 #[allow(unused_imports)]
 pub(crate) use mission_commands;
 #[allow(dead_code)]
-pub const MISSION_ALLOWED_COMMANDS: [&str; 10] = mission_commands!(command_names);
+pub const MISSION_ALLOWED_COMMANDS: [&str; 20] = mission_commands!(command_names);
 
 #[allow(unused_imports)]
 pub use mission_supervisor::mission_service::{MissionCommandRequest, MissionCommandResult};
@@ -68,6 +93,7 @@ pub use mission_supervisor::mission_service::{MissionCommandRequest, MissionComm
 pub enum BridgeError {
     Authentication,
     Protocol,
+    Timeout,
     Unavailable,
 }
 
@@ -209,7 +235,12 @@ impl<P: InstallSecretProvider> SupervisorTransport for LocalSupervisorTransport<
         if self.session.is_none() {
             self.session = Some(
                 self.connect_and_authenticate()
-                    .map_err(|_| "SUPERVISOR_UNAVAILABLE".to_owned())?,
+                    .map_err(|error| match error {
+                        BridgeError::Timeout => "SUPERVISOR_HANDSHAKE_TIMEOUT".to_owned(),
+                        BridgeError::Authentication => "SUPERVISOR_AUTH_FAILED".to_owned(),
+                        BridgeError::Protocol => "SUPERVISOR_PROTOCOL_ERROR".to_owned(),
+                        BridgeError::Unavailable => "SUPERVISOR_UNAVAILABLE".to_owned(),
+                    })?,
             );
         }
         let pipe = self.session.as_mut().expect("session was established");
@@ -217,7 +248,7 @@ impl<P: InstallSecretProvider> SupervisorTransport for LocalSupervisorTransport<
             command: command.to_owned(),
             request,
         });
-        let result = with_io_deadline(CLIENT_IO_TIMEOUT, || {
+        let result = with_io_deadline(command_io_timeout(command), || {
             write_frame(&mut *pipe, &message).map_err(|_| BridgeError::Unavailable)?;
             read_frame(pipe).map_err(|_| BridgeError::Unavailable)
         });
@@ -230,6 +261,10 @@ impl<P: InstallSecretProvider> SupervisorTransport for LocalSupervisorTransport<
                 })
             }
             Ok(_) => Err("SUPERVISOR_PROTOCOL_ERROR".to_owned()),
+            Err(BridgeError::Timeout) => {
+                self.session = None;
+                Err("SUPERVISOR_COMMAND_TIMEOUT".to_owned())
+            }
             Err(_) => {
                 self.session = None;
                 Err("SUPERVISOR_UNAVAILABLE".to_owned())
@@ -282,7 +317,7 @@ impl<P: InstallSecretProvider> LocalSupervisorTransport<P> {
             nonce,
             proof,
         });
-        with_io_deadline(CLIENT_IO_TIMEOUT, || {
+        with_io_deadline(HANDSHAKE_IO_TIMEOUT, || {
             write_frame(&mut pipe, &handshake).map_err(|_| BridgeError::Unavailable)?;
             match read_frame(&mut pipe).map_err(|_| BridgeError::Unavailable)? {
                 ServerMessage::HandshakeAccepted(accepted)
@@ -305,7 +340,7 @@ impl From<io::Error> for BridgeError {
 }
 
 fn ping_session(pipe: &mut File) -> Result<String, BridgeError> {
-    with_io_deadline(CLIENT_IO_TIMEOUT, || {
+    with_io_deadline(PING_IO_TIMEOUT, || {
         write_frame(&mut *pipe, &ClientMessage::Ping).map_err(|_| BridgeError::Unavailable)?;
         match read_frame(pipe).map_err(|_| BridgeError::Unavailable)? {
             ServerMessage::Pong(pong) if pong.protocol_version == PROTOCOL_VERSION => {
@@ -354,12 +389,16 @@ pub(crate) fn with_io_deadline<T>(
 ) -> Result<T, BridgeError> {
     let target = CancellationTarget::current()?;
     let (done_tx, done_rx) = mpsc::channel();
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let watchdog_timed_out = Arc::clone(&timed_out);
     let watchdog = thread::Builder::new()
         .name("mission-desktop-ipc-watchdog".to_owned())
         .spawn(move || -> io::Result<()> {
             match done_rx.recv_timeout(timeout) {
                 Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    watchdog_timed_out.store(true, Ordering::Release);
+                }
             }
 
             let mut cancellation_error = None;
@@ -380,10 +419,14 @@ pub(crate) fn with_io_deadline<T>(
         .map_err(|_| BridgeError::Unavailable)?;
     let result = operation();
     let _ = done_tx.send(());
-    watchdog
+    let watchdog_result = watchdog
         .join()
         .map_err(|_| BridgeError::Unavailable)?
-        .map_err(|_| BridgeError::Unavailable)?;
+        .map_err(|_| BridgeError::Unavailable);
+    if timed_out.load(Ordering::Acquire) {
+        return Err(BridgeError::Timeout);
+    }
+    watchdog_result?;
     result
 }
 
@@ -507,6 +550,11 @@ fn public_status(result: Result<String, BridgeError>) -> PublicSupervisorStatus 
             connection: "disconnected",
             version: None,
             error_code: Some("SUPERVISOR_PROTOCOL_INCOMPATIBLE"),
+        },
+        Err(BridgeError::Timeout) => PublicSupervisorStatus {
+            connection: "degraded",
+            version: None,
+            error_code: Some("SUPERVISOR_TIMEOUT"),
         },
         Err(BridgeError::Unavailable) => PublicSupervisorStatus {
             connection: "disconnected",

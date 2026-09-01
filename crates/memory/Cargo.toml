@@ -2,6 +2,7 @@
 name = "mission-memory"
 version = "0.1.0"
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 mission-domain = { path = "../domain" }

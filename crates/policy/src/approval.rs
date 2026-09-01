@@ -115,6 +115,14 @@ impl ApprovalRequest {
         self.state
     }
 
+    pub fn set_scope(&mut self, scope: ApprovalScope) -> Result<(), ApprovalError> {
+        if self.state != ApprovalState::Pending {
+            return Err(ApprovalError::NotPending);
+        }
+        self.scope = scope;
+        Ok(())
+    }
+
     pub const fn revision(&self) -> u64 {
         self.revision
     }

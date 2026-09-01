@@ -2,6 +2,7 @@
 name = "mission-control-desktop"
 version = "0.1.0"
 edition.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "mission-control-desktop"
@@ -16,6 +17,7 @@ mission-domain = { path = "../../../crates/domain" }
 mission-ledger = { path = "../../../crates/ledger" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tauri = { version = "2.11.5", features = [] }
 windows-sys.workspace = true

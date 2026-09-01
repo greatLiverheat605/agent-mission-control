@@ -92,6 +92,8 @@ pub fn reduce(current: &ReadModel, event: &EventEnvelope) -> Result<ReadModel, P
         }
         EventKind::ExplorationStarted
         | EventKind::AgentRunStarted
+        | EventKind::AgentRunCompleted
+        | EventKind::AgentRunAborted
         | EventKind::ApprovalRequested
         | EventKind::ApprovalResolved
         | EventKind::ApprovalRevoked
@@ -103,7 +105,9 @@ pub fn reduce(current: &ReadModel, event: &EventEnvelope) -> Result<ReadModel, P
         | EventKind::FlightEnvelopeChanged
         | EventKind::LoadoutChanged
         | EventKind::MemoryItemChanged
-        | EventKind::PauseRequested => {}
+        | EventKind::PauseRequested
+        | EventKind::RecoveryContinued
+        | EventKind::RecoveryAbandoned => {}
     }
     Ok(next)
 }

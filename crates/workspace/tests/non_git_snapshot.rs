@@ -37,16 +37,49 @@ fn non_git_snapshot_is_encrypted_deduplicated_scoped_and_restored_to_temp() {
         .expect("snapshot");
 
     assert_eq!(snapshot.manifest.entries.len(), 2);
-    assert_eq!(snapshot.manifest.entries[0].blob.hash, snapshot.manifest.entries[1].blob.hash);
-    assert!(snapshot.manifest.entries.iter().all(|entry| !entry.relative_path.contains("secret") && !entry.relative_path.contains("node_modules")));
+    assert_eq!(
+        snapshot.manifest.entries[0].blob.hash,
+        snapshot.manifest.entries[1].blob.hash
+    );
+    assert!(
+        snapshot
+            .manifest
+            .entries
+            .iter()
+            .all(|entry| !entry.relative_path.contains("secret")
+                && !entry.relative_path.contains("node_modules"))
+    );
     if linked {
-        assert!(snapshot.manifest.entries.iter().all(|entry| entry.relative_path != "escape.txt"));
+        assert!(
+            snapshot
+                .manifest
+                .entries
+                .iter()
+                .all(|entry| entry.relative_path != "escape.txt")
+        );
     }
-    let encrypted = fs::read(store.path_for(&snapshot.manifest.entries[0].blob).expect("blob path")).expect("encrypted blob");
-    assert!(!encrypted.windows(b"same plaintext".len()).any(|window| window == b"same plaintext"));
+    let encrypted = fs::read(
+        store
+            .path_for(&snapshot.manifest.entries[0].blob)
+            .expect("blob path"),
+    )
+    .expect("encrypted blob");
+    assert!(
+        !encrypted
+            .windows(b"same plaintext".len())
+            .any(|window| window == b"same plaintext")
+    );
 
-    let prepared = snapshotter.prepare_restore(&snapshot, &restore_parent).expect("prepare restore");
-    assert_eq!(fs::read(prepared.path.join("a.txt")).expect("restored a"), b"same plaintext");
-    assert_eq!(fs::read(prepared.path.join("nested/b.txt")).expect("restored b"), b"same plaintext");
+    let prepared = snapshotter
+        .prepare_restore(&snapshot, &restore_parent)
+        .expect("prepare restore");
+    assert_eq!(
+        fs::read(prepared.path.join("a.txt")).expect("restored a"),
+        b"same plaintext"
+    );
+    assert_eq!(
+        fs::read(prepared.path.join("nested/b.txt")).expect("restored b"),
+        b"same plaintext"
+    );
     assert_eq!(prepared.manifest_hash, snapshot.manifest.root_hash);
 }

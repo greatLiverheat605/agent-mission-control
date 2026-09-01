@@ -22,6 +22,8 @@ use windows_sys::Win32::Security::Cryptography::{
 pub enum KeyStoreError {
     #[error("key store unavailable")]
     Unavailable,
+    #[error("credential store unavailable (win32 error {0})")]
+    CredentialUnavailable(u32),
     #[error("stored database key has invalid length")]
     InvalidKey,
 }
@@ -76,7 +78,7 @@ impl KeyStore for WindowsCredentialKeyStore {
     fn load_or_create_database_key(&self, install_id: &str) -> Result<[u8; 32], KeyStoreError> {
         match self.load_database_key(install_id) {
             Ok(key) => Ok(key),
-            Err(KeyStoreError::Unavailable) if unsafe { GetLastError() } == ERROR_NOT_FOUND => {
+            Err(KeyStoreError::CredentialUnavailable(code)) if code == ERROR_NOT_FOUND => {
                 let mut key = [0_u8; 32];
                 getrandom::fill(&mut key).map_err(|_| KeyStoreError::Unavailable)?;
                 self.save_database_key(install_id, &key)?;
@@ -91,7 +93,9 @@ impl KeyStore for WindowsCredentialKeyStore {
         let mut credential = ptr::null_mut();
         let ok = unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) };
         if ok == 0 {
-            return Err(KeyStoreError::Unavailable);
+            // Capture the provider error while CredReadW is the immediately preceding call.
+            let error = unsafe { GetLastError() };
+            return Err(KeyStoreError::CredentialUnavailable(error));
         }
         let encrypted = unsafe {
             let value = &*credential;
@@ -131,6 +135,22 @@ fn target_name(install_id: &str) -> Vec<u16> {
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect()
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::{KeyStore, KeyStoreError, WindowsCredentialKeyStore};
+    use windows_sys::Win32::Foundation::ERROR_NOT_FOUND;
+
+    #[test]
+    fn credential_read_failure_preserves_immediate_error_code() {
+        let store = WindowsCredentialKeyStore;
+        let install_id = format!("r7-missing-{}", uuid::Uuid::new_v4());
+        assert!(matches!(
+            store.load_database_key(&install_id),
+            Err(KeyStoreError::CredentialUnavailable(ERROR_NOT_FOUND))
+        ));
+    }
 }
 
 #[cfg(windows)]

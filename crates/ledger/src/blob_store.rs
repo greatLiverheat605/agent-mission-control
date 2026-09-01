@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use hkdf::Hkdf;
+use mission_domain::MissionId;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -20,6 +21,13 @@ pub struct BlobRef {
     pub hash: String,
     pub size: u64,
     pub media_type: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BlobRecoveryReport {
+    pub temporary_files: Vec<String>,
+    pub missing_blob_files: Vec<String>,
+    pub recovery_required: bool,
 }
 
 #[derive(Debug, Error)]
@@ -159,6 +167,80 @@ impl EncryptedBlobStore {
         Ok(())
     }
 
+    /// Attach a blob to a mission exactly once and increment its shared reference count.
+    pub fn retain_for_mission(
+        &self,
+        mission_id: &MissionId,
+        reference: &BlobRef,
+    ) -> Result<(), BlobStoreError> {
+        validate_hash(&reference.hash)?;
+        let tx = self.connection.unchecked_transaction()?;
+        let known: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT size, media_type FROM blob_refs WHERE blob_hash = ?1",
+                [&reference.hash],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if known != Some((reference.size as i64, reference.media_type.clone())) {
+            return Err(BlobStoreError::InvalidReference);
+        }
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO mission_blob_refs(mission_id, blob_hash, size, media_type) VALUES (?1, ?2, ?3, ?4)",
+            params![mission_id.to_string(), reference.hash, reference.size as i64, reference.media_type],
+        )?;
+        if inserted != 0 {
+            tx.execute(
+                "UPDATE blob_refs SET ref_count = ref_count + 1 WHERE blob_hash = ?1",
+                [&reference.hash],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn mission_references(
+        &self,
+        mission_id: &MissionId,
+    ) -> Result<Vec<BlobRef>, BlobStoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT blob_hash, size, media_type FROM mission_blob_refs WHERE mission_id = ?1 ORDER BY blob_hash",
+        )?;
+        let rows = statement.query_map([mission_id.to_string()], |row| {
+            Ok(BlobRef {
+                hash: row.get(0)?,
+                size: u64::try_from(row.get::<_, i64>(1)?)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
+                media_type: row.get(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Remove a mission attachment and decrement the global count; physical cleanup remains explicit.
+    pub fn release_for_mission(
+        &self,
+        mission_id: &MissionId,
+        reference: &BlobRef,
+    ) -> Result<bool, BlobStoreError> {
+        validate_hash(&reference.hash)?;
+        let tx = self.connection.unchecked_transaction()?;
+        let removed = tx.execute(
+            "DELETE FROM mission_blob_refs WHERE mission_id = ?1 AND blob_hash = ?2 AND size = ?3 AND media_type = ?4",
+            params![mission_id.to_string(), reference.hash, reference.size as i64, reference.media_type],
+        )?;
+        if removed == 0 {
+            tx.commit()?;
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE blob_refs SET ref_count = max(ref_count - 1, 0) WHERE blob_hash = ?1",
+            [&reference.hash],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn release(&self, reference: &BlobRef) -> Result<bool, BlobStoreError> {
         validate_hash(&reference.hash)?;
         let tx = self.connection.unchecked_transaction()?;
@@ -212,6 +294,39 @@ impl EncryptedBlobStore {
     pub fn path_for(&self, reference: &BlobRef) -> Result<PathBuf, BlobStoreError> {
         validate_hash(&reference.hash)?;
         self.path_for_hash(&reference.hash)
+    }
+
+    /// Inspect incomplete writes and metadata references without deleting anything.
+    pub fn recovery_report(&self) -> Result<BlobRecoveryReport, BlobStoreError> {
+        let mut temporary_files = Vec::new();
+        let mut pending = vec![self.root.clone()];
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(directory)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.extension().is_some_and(|extension| extension == "tmp") {
+                    temporary_files.push(path.display().to_string());
+                }
+            }
+        }
+        let mut statement = self.connection.prepare("SELECT blob_hash FROM blob_refs")?;
+        let missing_blob_files = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .filter_map(Result::ok)
+            .filter_map(|hash| {
+                self.path_for_hash(&hash)
+                    .ok()
+                    .filter(|path| !path.exists())
+                    .map(|_| hash)
+            })
+            .collect::<Vec<_>>();
+        Ok(BlobRecoveryReport {
+            recovery_required: !temporary_files.is_empty() || !missing_blob_files.is_empty(),
+            temporary_files,
+            missing_blob_files,
+        })
     }
 
     fn path_for_hash(&self, hash: &str) -> Result<PathBuf, BlobStoreError> {

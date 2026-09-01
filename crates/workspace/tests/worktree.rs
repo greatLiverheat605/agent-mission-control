@@ -7,8 +7,16 @@ use std::time::Duration;
 use mission_workspace::{BaselineSelection, GitRunner, RouteWorkspaceManager, WorkspaceError};
 
 fn git(cwd: &Path, args: &[&str]) -> String {
-    let output = Command::new("git").args(args).current_dir(cwd).output().expect("git");
-    assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("git");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
@@ -30,7 +38,10 @@ fn worktree_is_created_on_an_opaque_route_branch_without_touching_user_changes()
     repo(&source);
     fs::write(source.join("tracked.txt"), b"user change\n").expect("dirty");
     fs::write(source.join("untracked.txt"), b"keep me\n").expect("untracked");
-    let before = git(&source, &["status", "--porcelain=v1", "--untracked-files=all"]);
+    let before = git(
+        &source,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+    );
     let head = git(&source, &["rev-parse", "HEAD"]);
     let manager = RouteWorkspaceManager::new(
         GitRunner::new(OsStr::new("git"), &source, Duration::from_secs(10)).expect("runner"),
@@ -39,13 +50,27 @@ fn worktree_is_created_on_an_opaque_route_branch_without_touching_user_changes()
     .expect("manager");
 
     let route = manager
-        .create("mission-0123456789", "route-abcdef0123", BaselineSelection::CommittedHead(head.clone()))
+        .create(
+            "mission-0123456789",
+            "route-abcdef0123",
+            BaselineSelection::CommittedHead(head.clone()),
+        )
         .expect("create route worktree");
 
     assert_eq!(route.branch, "mission/mission0/routeabc");
-    assert!(route.path.starts_with(managed.canonicalize().expect("canonical managed root")));
+    assert!(
+        route
+            .path
+            .starts_with(managed.canonicalize().expect("canonical managed root"))
+    );
     assert_eq!(git(&route.path, &["rev-parse", "HEAD"]), head);
-    assert_eq!(git(&source, &["status", "--porcelain=v1", "--untracked-files=all"]), before);
+    assert_eq!(
+        git(
+            &source,
+            &["status", "--porcelain=v1", "--untracked-files=all"]
+        ),
+        before
+    );
 }
 
 #[test]
@@ -60,7 +85,20 @@ fn worktree_rejects_existing_branch_or_nonempty_target() {
         &managed,
     )
     .expect("manager");
-    manager.create("mission-0123456789", "route-abcdef0123", BaselineSelection::CommittedHead(head.clone())).expect("first");
+    manager
+        .create(
+            "mission-0123456789",
+            "route-abcdef0123",
+            BaselineSelection::CommittedHead(head.clone()),
+        )
+        .expect("first");
 
-    assert!(matches!(manager.create("mission-0123456789", "route-abcdef0123", BaselineSelection::CommittedHead(head)), Err(WorkspaceError::BranchExists(_)) | Err(WorkspaceError::TargetNotEmpty(_))));
+    assert!(matches!(
+        manager.create(
+            "mission-0123456789",
+            "route-abcdef0123",
+            BaselineSelection::CommittedHead(head)
+        ),
+        Err(WorkspaceError::BranchExists(_)) | Err(WorkspaceError::TargetNotEmpty(_))
+    ));
 }

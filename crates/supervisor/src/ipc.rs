@@ -29,6 +29,7 @@ use windows_sys::Win32::System::Pipes::{
 const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MIN_COMMAND_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(10);
 
 pub trait IpcDispatcher: Send + Sync {
     fn dispatch(
@@ -234,7 +235,13 @@ fn serve_with_idle_timeout<P: InstallSecretProvider + Send + 'static>(
     let worker = thread::Builder::new()
         .name("mission-supervisor-ipc-connection".to_owned())
         .spawn(move || {
-            serve_connection(&mut instance.0, &mut verifier, &activity_tx, dispatcher);
+            serve_connection(
+                &mut instance.0,
+                &mut verifier,
+                &activity_tx,
+                idle_timeout,
+                dispatcher,
+            );
             unsafe {
                 FlushFileBuffers(instance.0.as_raw_handle().cast());
             }
@@ -276,6 +283,7 @@ fn serve_connection<P: InstallSecretProvider>(
     pipe: &mut File,
     verifier: &mut HandshakeVerifier<P>,
     activity: &mpsc::Sender<()>,
+    idle_timeout: Duration,
     dispatcher: Arc<dyn IpcDispatcher>,
 ) {
     let mut authenticated_protocol = None;
@@ -321,6 +329,24 @@ fn serve_connection<P: InstallSecretProvider>(
             }
             (Some(_), ClientMessage::Command(command)) => {
                 dispatcher.touch_ui();
+                let heartbeat_interval = (idle_timeout / 3).max(MIN_COMMAND_HEARTBEAT_INTERVAL);
+                let (heartbeat_stop_tx, heartbeat_stop_rx) = mpsc::channel();
+                let heartbeat_activity = activity.clone();
+                let heartbeat_dispatcher = Arc::clone(&dispatcher);
+                let heartbeat = thread::Builder::new()
+                    .name("mission-supervisor-ipc-command-heartbeat".to_owned())
+                    .spawn(move || {
+                        loop {
+                            match heartbeat_stop_rx.recv_timeout(heartbeat_interval) {
+                                Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+                                Err(RecvTimeoutError::Timeout) => {
+                                    let _ = heartbeat_activity.send(());
+                                    heartbeat_dispatcher.touch_ui();
+                                }
+                            }
+                        }
+                    })
+                    .ok();
                 let response = match dispatcher.dispatch(&command.command, command.request) {
                     Ok(result) => ServerMessage::Command(CommandResponse {
                         command: command.command,
@@ -333,6 +359,10 @@ fn serve_connection<P: InstallSecretProvider>(
                         error: Some(error),
                     }),
                 };
+                let _ = heartbeat_stop_tx.send(());
+                if let Some(heartbeat) = heartbeat {
+                    let _ = heartbeat.join();
+                }
                 if write_frame(pipe, &response).is_err() {
                     return;
                 }
@@ -415,7 +445,8 @@ fn last_error(operation: &str) -> io::Error {
 mod tests {
     use std::fs::{File, OpenOptions};
     use std::io::{self, Write};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -438,6 +469,26 @@ mod tests {
     impl InstallSecretProvider for FixtureSecret {
         fn install_secret(&self) -> io::Result<Vec<u8>> {
             Ok(FIXTURE_SECRET.to_vec())
+        }
+    }
+
+    struct SlowDispatcher {
+        delay: Duration,
+        heartbeats: Arc<AtomicUsize>,
+    }
+
+    impl super::IpcDispatcher for SlowDispatcher {
+        fn dispatch(
+            &self,
+            command: &str,
+            request: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            thread::sleep(self.delay);
+            Ok(serde_json::json!({ "command": command, "request": request }))
+        }
+
+        fn touch_ui(&self) {
+            self.heartbeats.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -569,5 +620,46 @@ mod tests {
         assert!(server.is_running());
         drop(client);
         server.shutdown().expect("stop short-timeout server");
+    }
+
+    #[test]
+    fn in_flight_command_emits_heartbeats_until_response() {
+        let pipe_name = unique_pipe_name();
+        let heartbeats = Arc::new(AtomicUsize::new(0));
+        let server = IpcServer::spawn_with_idle_timeout_and_dispatcher(
+            &pipe_name,
+            INSTALL_ID,
+            FixtureSecret,
+            TEST_IDLE_TIMEOUT,
+            Arc::new(SlowDispatcher {
+                delay: Duration::from_millis(250),
+                heartbeats: Arc::clone(&heartbeats),
+            }),
+        )
+        .expect("start long-command fixture server");
+        let mut client = connect(&pipe_name);
+        assert!(matches!(
+            exchange(&mut client, &handshake(6)),
+            ServerMessage::HandshakeAccepted(_)
+        ));
+
+        let started = Instant::now();
+        let response = exchange(
+            &mut client,
+            &ClientMessage::Command(mission_protocol::handshake::CommandRequest {
+                command: "launch_route".to_owned(),
+                request: serde_json::json!({ "fixture": true }),
+            }),
+        );
+
+        assert!(matches!(response, ServerMessage::Command(_)));
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        assert!(
+            heartbeats.load(Ordering::SeqCst) >= 2,
+            "long command did not refresh the IPC/UI lease"
+        );
+        assert!(server.is_running());
+        drop(client);
+        server.shutdown().expect("stop long-command fixture server");
     }
 }

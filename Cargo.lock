@@ -22,14 +22,18 @@ name = "adapter-codex"
 version = "0.1.0"
 dependencies = [
  "adapter-core",
+ "adapter-detect",
  "async-trait",
  "mission-domain",
+ "mission-ledger",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2028,6 +2032,7 @@ dependencies = [
  "mission-supervisor",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tempfile",

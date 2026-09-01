@@ -31,6 +31,8 @@ pub enum EventKind {
     RouteStateChanged,
     ExplorationStarted,
     AgentRunStarted,
+    AgentRunCompleted,
+    AgentRunAborted,
     AgentMessage,
     EvidenceRecorded,
     ApprovalRequested,
@@ -45,6 +47,8 @@ pub enum EventKind {
     LoadoutChanged,
     MemoryItemChanged,
     PauseRequested,
+    RecoveryContinued,
+    RecoveryAbandoned,
     Unknown(String),
 }
 
@@ -57,6 +61,8 @@ impl EventKind {
             Self::RouteStateChanged => "route_state_changed",
             Self::ExplorationStarted => "exploration_started",
             Self::AgentRunStarted => "agent_run_started",
+            Self::AgentRunCompleted => "agent_run_completed",
+            Self::AgentRunAborted => "agent_run_aborted",
             Self::AgentMessage => "agent_message",
             Self::EvidenceRecorded => "evidence_recorded",
             Self::ApprovalRequested => "approval_requested",
@@ -71,6 +77,8 @@ impl EventKind {
             Self::LoadoutChanged => "loadout_changed",
             Self::MemoryItemChanged => "memory_item_changed",
             Self::PauseRequested => "pause_requested",
+            Self::RecoveryContinued => "recovery_continued",
+            Self::RecoveryAbandoned => "recovery_abandoned",
             Self::Unknown(value) => value,
         }
     }
@@ -110,6 +118,8 @@ impl<'de> Deserialize<'de> for EventKind {
                     "route_state_changed" => EventKind::RouteStateChanged,
                     "exploration_started" => EventKind::ExplorationStarted,
                     "agent_run_started" => EventKind::AgentRunStarted,
+                    "agent_run_completed" => EventKind::AgentRunCompleted,
+                    "agent_run_aborted" => EventKind::AgentRunAborted,
                     "agent_message" => EventKind::AgentMessage,
                     "evidence_recorded" => EventKind::EvidenceRecorded,
                     "approval_requested" => EventKind::ApprovalRequested,
@@ -124,6 +134,8 @@ impl<'de> Deserialize<'de> for EventKind {
                     "loadout_changed" => EventKind::LoadoutChanged,
                     "memory_item_changed" => EventKind::MemoryItemChanged,
                     "pause_requested" => EventKind::PauseRequested,
+                    "recovery_continued" => EventKind::RecoveryContinued,
+                    "recovery_abandoned" => EventKind::RecoveryAbandoned,
                     other => EventKind::Unknown(other.to_owned()),
                 })
             }

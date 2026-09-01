@@ -1,7 +1,7 @@
 use mission_domain::{MissionId, RouteId};
 use mission_policy::{
-    ActionClass, ApprovalAction, ApprovalActor, ApprovalError, ApprovalRequest,
-    ApprovalResolution, ApprovalScope, ApprovalState, ApprovalSubject,
+    ActionClass, ApprovalAction, ApprovalActor, ApprovalError, ApprovalRequest, ApprovalResolution,
+    ApprovalScope, ApprovalState, ApprovalSubject,
 };
 
 fn subject() -> ApprovalSubject {

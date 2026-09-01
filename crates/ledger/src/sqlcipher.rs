@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use mission_domain::{EventEnvelope, EventId, MissionId, RouteId, Timestamp};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::key_store::{KeyStore, KeyStoreError};
@@ -29,6 +30,16 @@ pub enum LedgerError {
     Io(#[from] std::io::Error),
     #[error("invalid event payload: {0}")]
     InvalidPayload(String),
+    #[error("LEDGER_INTEGRITY_FAILED: {0}")]
+    IntegrityFailed(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LedgerIntegrityReport {
+    pub event_count: u64,
+    pub last_committed_sequence: u64,
+    pub recovery_required: bool,
+    pub reason: Option<String>,
 }
 
 impl From<KeyStoreError> for LedgerError {
@@ -47,6 +58,16 @@ pub struct EncryptedLedger {
     path: PathBuf,
     connection: Connection,
     redactor: Redactor,
+}
+
+impl EncryptedLedger {
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    pub(crate) fn connection_mut(&mut self) -> &mut Connection {
+        &mut self.connection
+    }
 }
 
 impl EncryptedLedger {
@@ -105,11 +126,13 @@ impl EncryptedLedger {
         if sentinel.as_deref() != Some("mission-ledger-sqlcipher-v1") {
             return Err(LedgerError::KeyMismatch);
         }
-        Ok(Self {
+        let ledger = Self {
             path,
             connection,
             redactor: Redactor::default(),
-        })
+        };
+        ledger.integrity_report()?;
+        Ok(ledger)
     }
 
     pub fn append(&mut self, event: &EventEnvelope) -> Result<(), LedgerError> {
@@ -185,6 +208,123 @@ impl EncryptedLedger {
         Ok(())
     }
 
+    /// Append a group of events in one transaction.
+    ///
+    /// All validation and redaction is performed before the transaction is
+    /// committed.  Any sequence, duplicate, or database error therefore
+    /// rolls the entire group back, which is required for multi-event
+    /// lifecycle operations such as mission creation.
+    pub fn append_batch(&mut self, events: &[EventEnvelope]) -> Result<(), LedgerError> {
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        struct PreparedEvent<'a> {
+            event: &'a EventEnvelope,
+            sequence: i64,
+            payload: String,
+            raw_evidence: Option<String>,
+            payload_hash: String,
+        }
+
+        let mut prepared = Vec::with_capacity(events.len());
+        for event in events {
+            if !event.has_valid_payload_hash() {
+                return Err(LedgerError::InvalidPayload(
+                    "event payload hash does not match payload".to_owned(),
+                ));
+            }
+            let sequence =
+                i64::try_from(event.sequence).map_err(|_| LedgerError::SequenceViolation)?;
+            let redacted = self.redactor.redact_event(event.payload.clone())?;
+            let payload = serde_json::to_string(&redacted.value)
+                .map_err(|error| LedgerError::InvalidPayload(error.to_string()))?;
+            let payload_hash = persisted_payload_hash(&redacted.value);
+            let raw_evidence = event
+                .raw_evidence
+                .as_ref()
+                .map(|value| self.redactor.redact_event(value.clone()))
+                .transpose()?
+                .map(|redacted| {
+                    serde_json::to_string(&redacted.value)
+                        .map_err(|error| LedgerError::InvalidPayload(error.to_string()))
+                })
+                .transpose()?;
+            prepared.push(PreparedEvent {
+                event,
+                sequence,
+                payload,
+                raw_evidence,
+                payload_hash,
+            });
+        }
+
+        let tx = self.connection.transaction()?;
+        for item in prepared {
+            let event = item.event;
+            let mission_id = event.mission_id.to_string();
+            let last: Option<i64> = tx
+                .query_row(
+                    "SELECT sequence FROM events WHERE mission_id = ?1 ORDER BY sequence DESC LIMIT 1",
+                    [&mission_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(existing) = tx
+                .query_row(
+                    "SELECT mission_id, sequence, payload_hash, raw_evidence, schema_version, route_id, kind, occurred_at FROM events WHERE event_id = ?1",
+                    [event.event_id.to_string()],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, String>(5)?,
+                            row.get::<_, String>(6)?,
+                            row.get::<_, String>(7)?,
+                        ))
+                    },
+                )
+                .optional()?
+            {
+                if existing.0 == mission_id
+                    && existing.1 == item.sequence
+                    && existing.2 == item.payload_hash
+                    && existing.3 == item.raw_evidence
+                    && existing.4 == i64::from(event.schema_version)
+                    && existing.5 == event.route_id.to_string()
+                    && existing.6 == event.kind.as_str()
+                    && existing.7 == event.occurred_at.as_str()
+                {
+                    continue;
+                }
+                return Err(LedgerError::DuplicateConflict);
+            }
+            if last.map_or(item.sequence != 1, |previous| item.sequence != previous + 1) {
+                return Err(LedgerError::SequenceViolation);
+            }
+            tx.execute(
+                "INSERT INTO events(mission_id, route_id, sequence, event_id, schema_version, kind, occurred_at, payload, raw_evidence, payload_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    mission_id,
+                    event.route_id.to_string(),
+                    item.sequence,
+                    event.event_id.to_string(),
+                    event.schema_version as i64,
+                    event.kind.as_str(),
+                    event.occurred_at.as_str(),
+                    item.payload,
+                    item.raw_evidence,
+                    item.payload_hash,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn replay(&self, mission_id: &str) -> Result<Vec<(u64, String, String)>, LedgerError> {
         let mut statement = self.connection.prepare(
             "SELECT sequence, kind, payload FROM events WHERE mission_id = ?1 ORDER BY sequence",
@@ -239,7 +379,16 @@ impl EncryptedLedger {
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             Ok(event)
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let events = rows.collect::<Result<Vec<_>, _>>()?;
+        for event in &events {
+            if !event.has_valid_payload_hash() {
+                return Err(LedgerError::IntegrityFailed(format!(
+                    "payload hash mismatch for mission {} sequence {}",
+                    mission_id, event.sequence
+                )));
+            }
+        }
+        Ok(events)
     }
 
     pub fn mission_ids(&self) -> Result<Vec<MissionId>, LedgerError> {
@@ -253,6 +402,62 @@ impl EncryptedLedger {
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Validate the committed event stream without mutating the database.
+    /// A sequence gap is recovery-required evidence, never something to repair silently.
+    pub fn integrity_report(&self) -> Result<LedgerIntegrityReport, LedgerError> {
+        let quick_check: String = self
+            .connection
+            .query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+        if !quick_check.eq_ignore_ascii_case("ok") {
+            return Err(LedgerError::IntegrityFailed(quick_check));
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT mission_id, sequence, payload, payload_hash FROM events ORDER BY mission_id, sequence",
+        )?;
+        let mut rows = statement.query([])?;
+        let mut current_mission = String::new();
+        let mut expected = 1_u64;
+        let mut count = 0_u64;
+        let mut last = 0_u64;
+        while let Some(row) = rows.next()? {
+            let mission: String = row.get(0)?;
+            let sequence: i64 = row.get(1)?;
+            let sequence = u64::try_from(sequence)
+                .map_err(|_| LedgerError::IntegrityFailed("negative sequence".to_owned()))?;
+            let payload: String = row.get(2)?;
+            let stored_hash: String = row.get(3)?;
+            let payload: serde_json::Value = serde_json::from_str(&payload).map_err(|error| {
+                LedgerError::IntegrityFailed(format!(
+                    "invalid payload for mission {mission} sequence {sequence}: {error}"
+                ))
+            })?;
+            let actual_hash = persisted_payload_hash(&payload);
+            if actual_hash != stored_hash {
+                return Err(LedgerError::IntegrityFailed(format!(
+                    "payload hash mismatch for mission {mission} sequence {sequence}"
+                )));
+            }
+            if mission != current_mission {
+                current_mission = mission;
+                expected = 1;
+            }
+            if sequence != expected {
+                return Err(LedgerError::IntegrityFailed(format!(
+                    "sequence gap for mission at expected {expected}, found {sequence}"
+                )));
+            }
+            expected = expected.saturating_add(1);
+            count = count.saturating_add(1);
+            last = last.max(sequence);
+        }
+        Ok(LedgerIntegrityReport {
+            event_count: count,
+            last_committed_sequence: last,
+            recovery_required: false,
+            reason: None,
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -288,4 +493,67 @@ fn persisted_payload_hash(payload: &serde_json::Value) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::InMemoryKeyStore;
+    use mission_domain::{EventId, EventKind};
+    use serde_json::json;
+
+    #[test]
+    fn integrity_and_replay_reject_payload_tampering_with_location() {
+        let path = std::env::temp_dir().join(format!(
+            "mission-ledger-integrity-hash-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let store = InMemoryKeyStore::default();
+        let mission_id = MissionId::new();
+        let route_id = RouteId::new();
+        let mut ledger = EncryptedLedger::open(&path, "install", store).expect("open ledger");
+        let event = EventEnvelope::new(
+            EventId::new(),
+            mission_id,
+            route_id,
+            1,
+            EventKind::MissionCreated,
+            json!({"value":"original"}),
+        );
+        ledger.append(&event).expect("append");
+        ledger
+            .connection_mut()
+            .execute(
+                "UPDATE events SET payload = ?1 WHERE mission_id = ?2 AND sequence = 1",
+                rusqlite::params![r#"{"value":"tampered"}"#, mission_id.to_string()],
+            )
+            .expect("tamper payload");
+
+        let report = ledger.integrity_report();
+        let report_error = report.expect_err("tampering must fail integrity report");
+        let message = report_error.to_string();
+        assert!(
+            message.contains(&mission_id.to_string()),
+            "missing mission location: {message}"
+        );
+        assert!(
+            message.contains("sequence 1"),
+            "missing sequence location: {message}"
+        );
+
+        let replay_error = ledger
+            .replay_events(&mission_id)
+            .expect_err("tampering must fail replay");
+        let replay_message = replay_error.to_string();
+        assert!(
+            replay_message.contains(&mission_id.to_string()),
+            "missing mission location: {replay_message}"
+        );
+        assert!(
+            replay_message.contains("sequence 1"),
+            "missing sequence location: {replay_message}"
+        );
+        drop(ledger);
+        let _ = std::fs::remove_file(path);
+    }
 }
