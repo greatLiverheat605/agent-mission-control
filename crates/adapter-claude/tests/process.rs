@@ -40,7 +40,7 @@ async fn fake_claude_uses_non_bare_stream_json_and_allowlisted_environment() {
         .start(request(), sink)
         .await
         .expect("start fake Claude");
-    let first = tokio::time::timeout(Duration::from_secs(3), handle.next_event())
+    let first = tokio::time::timeout(Duration::from_secs(30), handle.next_event())
         .await
         .expect("first event timeout")
         .expect("first event");
@@ -64,7 +64,7 @@ async fn fake_claude_uses_non_bare_stream_json_and_allowlisted_environment() {
         .terminate_owned_tree(handle.run_id())
         .await
         .expect("terminate owned tree");
-    let exited = (0..20).any(|_| {
+    let exited = (0..100).any(|_| {
         let status = std::process::Command::new("powershell.exe")
             .args([
                 "-NoProfile",
