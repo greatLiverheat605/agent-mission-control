@@ -8,7 +8,16 @@ $hasVerbose = $VerbosePreference -eq "Continue"
 $hasBare = $RemainingArgs -contains "--bare"
 $child = $null
 if ($RemainingArgs -notcontains "--version") {
-  $child = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "ping 127.0.0.1 -n 30 > nul") -PassThru -WindowStyle Hidden
+  # Raw CreateProcess (UseShellExecute=false) keeps the child inside the caller's
+  # Windows Job Object. Start-Process goes through ShellExecute, whose resolution
+  # varies with the environment (PATHEXT presence, headless sessions) and can
+  # break job membership or hang on CI runners.
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $env:ComSpec
+  $psi.Arguments = "/c ping 127.0.0.1 -n 30 > nul"
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $child = [System.Diagnostics.Process]::Start($psi)
 }
 $payload = @{
   type = "system"
