@@ -40,7 +40,7 @@ async fn fake_claude_uses_non_bare_stream_json_and_allowlisted_environment() {
         .start(request(), sink)
         .await
         .expect("start fake Claude");
-    let first = tokio::time::timeout(Duration::from_secs(30), handle.next_event())
+    let first = tokio::time::timeout(Duration::from_secs(60), handle.next_event())
         .await
         .expect("first event timeout")
         .expect("first event");

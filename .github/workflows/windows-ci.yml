@@ -58,34 +58,37 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           Write-Host "PSVersion: $($PSVersionTable.PSVersion)"
-          $sw = [Diagnostics.Stopwatch]::StartNew()
-          $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File fixtures/agents/bin/fake-claude.ps1 --version 2>&1
-          $sw.Stop()
-          Write-Host "A full-env --version: $($sw.TotalSeconds.ToString('F2'))s lines=$(@($out).Count) first=$($out | Select-Object -First 1)"
-          $psi = New-Object System.Diagnostics.ProcessStartInfo
-          $psi.FileName = 'powershell.exe'
-          $psi.Arguments = '-NoProfile -ExecutionPolicy Bypass -File fixtures/agents/bin/fake-claude.ps1 --output-format stream-json --verbose'
-          $psi.UseShellExecute = $false
-          $psi.CreateNoWindow = $true
-          $psi.RedirectStandardOutput = $true
-          $psi.RedirectStandardError = $true
-          $vars = 'SystemRoot','SystemDrive','ComSpec','PATH','TEMP','TMP'
-          $keep = @{}
-          foreach ($v in $vars) { $keep[$v] = [Environment]::GetEnvironmentVariable($v) }
-          $psi.EnvironmentVariables.Clear()
-          foreach ($v in $vars) { $psi.EnvironmentVariables[$v] = $keep[$v] }
-          $sw2 = [Diagnostics.Stopwatch]::StartNew()
-          $p = [System.Diagnostics.Process]::Start($psi)
-          $readTask = $p.StandardOutput.ReadLineAsync()
-          if ($readTask.Wait(90000)) {
-            $sw2.Stop()
-            Write-Host "B cleared-env first-line: $($sw2.TotalSeconds.ToString('F2'))s line=$($readTask.Result)"
-          } else {
-            Write-Host "B cleared-env first-line: TIMEOUT >90s"
+          function Test-Combo([string]$Label, [string[]]$ExtraVars) {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = 'powershell.exe'
+            $psi.Arguments = '-NoProfile -ExecutionPolicy Bypass -File fixtures/agents/bin/fake-claude.ps1 --output-format stream-json --verbose'
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $vars = @('SystemRoot','SystemDrive','ComSpec','PATH','TEMP','TMP') + $ExtraVars
+            $keep = @{}
+            foreach ($v in $vars) { $keep[$v] = [Environment]::GetEnvironmentVariable($v) }
+            $psi.EnvironmentVariables.Clear()
+            foreach ($v in $vars) { if ($keep[$v]) { $psi.EnvironmentVariables[$v] = $keep[$v] } }
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $p = [System.Diagnostics.Process]::Start($psi)
+            $t = $p.StandardOutput.ReadLineAsync()
+            if ($t.Wait(70000)) {
+              Write-Host ("COMBO {0,-38} {1,8:F2}s" -f $Label, $sw.Elapsed.TotalSeconds)
+            } else {
+              Write-Host ("COMBO {0,-38} TIMEOUT" -f $Label)
+            }
+            if (-not $p.WaitForExit(90000)) { $p.Kill() }
+            $p.Dispose()
           }
-          if (-not $p.WaitForExit(120000)) { $p.Kill() }
-          $errText = $p.StandardError.ReadToEnd()
-          Write-Host "C cleared-env exit=$($p.ExitCode) err=$errText"
+          Test-Combo 'six-baseline' @()
+          Test-Combo 'six+COMPUTERNAME' @('COMPUTERNAME')
+          Test-Combo 'six+profile' @('USERNAME','USERPROFILE','APPDATA','LOCALAPPDATA')
+          Test-Combo 'six+WINDIR' @('WINDIR')
+          Test-Combo 'six+processor' @('PROCESSOR_ARCHITECTURE','NUMBER_OF_PROCESSORS')
+          Test-Combo 'six+programdata-family' @('PROGRAMDATA','PUBLIC','ALLUSERSPROFILE')
+          Test-Combo 'six+everything-above' @('COMPUTERNAME','USERNAME','USERPROFILE','APPDATA','LOCALAPPDATA','WINDIR','PROCESSOR_ARCHITECTURE','NUMBER_OF_PROCESSORS','PROGRAMDATA','PUBLIC','ALLUSERSPROFILE')
 
       - name: Test Rust workspace
         shell: powershell
