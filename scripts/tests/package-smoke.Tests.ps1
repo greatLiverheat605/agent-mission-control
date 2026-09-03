@@ -434,7 +434,7 @@ Describe 'Windows package CI contract' {
     It 'ignores the local Pester CI result file' {
         $ignore = Get-Content -Raw -Encoding utf8 -LiteralPath (Join-Path $repositoryRoot '.gitignore')
 
-        $ignore | Should -Match '(?m)^testResults\.xml$'
+        $ignore | Should -Match '(?m)^testResults\.xml\r?$'
     }
 
     It 'exposes repeatable local package verification commands' {
