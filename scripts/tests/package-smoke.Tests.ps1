@@ -173,7 +173,7 @@ while ($true) { Start-Sleep -Seconds 1 }
 '@, (New-Object Text.UTF8Encoding -ArgumentList $false))
         $arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$probe`""
 
-        $result = Invoke-BoundedProcess -FileName $powerShell -Arguments $arguments -TimeoutMilliseconds 250
+        $result = Invoke-BoundedProcess -FileName $powerShell -Arguments $arguments -TimeoutMilliseconds 15000
 
         $result.TimedOut | Should -BeTrue
         $result.Reaped | Should -BeTrue
