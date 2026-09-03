@@ -53,43 +53,6 @@ jobs:
         shell: powershell
         run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 
-      - name: Diagnose fake-claude fixture timing (temporary)
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Continue'
-          Write-Host "PSVersion: $($PSVersionTable.PSVersion)"
-          function Test-Combo([string]$Label, [string[]]$ExtraVars) {
-            $psi = New-Object System.Diagnostics.ProcessStartInfo
-            $psi.FileName = 'powershell.exe'
-            $psi.Arguments = '-NoProfile -ExecutionPolicy Bypass -File fixtures/agents/bin/fake-claude.ps1 --output-format stream-json --verbose'
-            $psi.UseShellExecute = $false
-            $psi.CreateNoWindow = $true
-            $psi.RedirectStandardOutput = $true
-            $psi.RedirectStandardError = $true
-            $vars = @('SystemRoot','SystemDrive','ComSpec','PATH','TEMP','TMP') + $ExtraVars
-            $keep = @{}
-            foreach ($v in $vars) { $keep[$v] = [Environment]::GetEnvironmentVariable($v) }
-            $psi.EnvironmentVariables.Clear()
-            foreach ($v in $vars) { if ($keep[$v]) { $psi.EnvironmentVariables[$v] = $keep[$v] } }
-            $sw = [Diagnostics.Stopwatch]::StartNew()
-            $p = [System.Diagnostics.Process]::Start($psi)
-            $t = $p.StandardOutput.ReadLineAsync()
-            if ($t.Wait(70000)) {
-              Write-Host ("COMBO {0,-38} {1,8:F2}s" -f $Label, $sw.Elapsed.TotalSeconds)
-            } else {
-              Write-Host ("COMBO {0,-38} TIMEOUT" -f $Label)
-            }
-            if (-not $p.WaitForExit(90000)) { $p.Kill() }
-            $p.Dispose()
-          }
-          Test-Combo 'six-baseline' @()
-          Test-Combo 'six+COMPUTERNAME' @('COMPUTERNAME')
-          Test-Combo 'six+profile' @('USERNAME','USERPROFILE','APPDATA','LOCALAPPDATA')
-          Test-Combo 'six+WINDIR' @('WINDIR')
-          Test-Combo 'six+processor' @('PROCESSOR_ARCHITECTURE','NUMBER_OF_PROCESSORS')
-          Test-Combo 'six+programdata-family' @('PROGRAMDATA','PUBLIC','ALLUSERSPROFILE')
-          Test-Combo 'six+everything-above' @('COMPUTERNAME','USERNAME','USERPROFILE','APPDATA','LOCALAPPDATA','WINDIR','PROCESSOR_ARCHITECTURE','NUMBER_OF_PROCESSORS','PROGRAMDATA','PUBLIC','ALLUSERSPROFILE')
-
       - name: Test Rust workspace
         shell: powershell
         run: cargo test --workspace --all-targets --locked --offline
@@ -117,6 +80,10 @@ jobs:
       - name: Prepare desktop E2E binaries
         shell: powershell
         run: npm.cmd run pretest:e2e --workspace @mission-control/desktop
+
+      - name: Install Playwright browsers
+        shell: powershell
+        run: npx.cmd playwright install chromium
 
       - name: Run desktop E2E against freshly built binaries
         shell: powershell
